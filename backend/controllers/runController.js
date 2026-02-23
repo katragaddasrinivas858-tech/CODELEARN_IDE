@@ -1,4 +1,4 @@
-const { spawn } = require("child_process");
+const { spawn, spawnSync } = require("child_process");
 const { randomUUID } = require("crypto");
 const fs = require("fs");
 const os = require("os");
@@ -17,11 +17,270 @@ const SESSION_TIMEOUT_MS = (() => {
 })();
 const SESSION_TTL_MS = 30000;
 const runSessions = new Map();
+const PY_DEPS_CACHE_ROOT = path.join(os.tmpdir(), "codelearn-pydeps-cache");
+const MODULE_CHECK_TIMEOUT_MS = 15000;
+const DEFAULT_PIP_INSTALL_TIMEOUT_MS = 120000;
+const PIP_INSTALL_TIMEOUT_MS = (() => {
+  const raw = Number(process.env.RUN_PIP_INSTALL_TIMEOUT_MS);
+  if (!Number.isFinite(raw) || raw <= 0) return DEFAULT_PIP_INSTALL_TIMEOUT_MS;
+  return Math.max(raw, 10000);
+})();
+const SUPPORTED_PYPI_POLICIES = new Set(["allow-all", "allowlist", "disabled"]);
+const PYPI_INSTALL_POLICY = (() => {
+  const raw = String(process.env.PYPI_INSTALL_POLICY || "allow-all").trim().toLowerCase();
+  return SUPPORTED_PYPI_POLICIES.has(raw) ? raw : "allow-all";
+})();
+const normalizePackageName = (value) =>
+  String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/_/g, "-");
+const PYPI_ALLOWLIST = new Set(
+  String(process.env.PYPI_ALLOWLIST || "")
+    .split(",")
+    .map((pkg) => normalizePackageName(pkg))
+    .filter(Boolean)
+);
+const IMPORT_TO_PIP_PACKAGE = Object.freeze({
+  bs4: "beautifulsoup4",
+  cv2: "opencv-python",
+  dateutil: "python-dateutil",
+  pil: "Pillow",
+  yaml: "PyYAML",
+  sklearn: "scikit-learn",
+  crypto: "pycryptodome",
+});
 
 const invalidInputError = (message) => {
   const err = new Error(message);
   err.status = 400;
   return err;
+};
+
+const mergePythonPath = (entries = []) => {
+  const deduped = [];
+  const seen = new Set();
+  const add = (value) => {
+    const normalized = String(value || "").trim();
+    if (!normalized || seen.has(normalized)) return;
+    seen.add(normalized);
+    deduped.push(normalized);
+  };
+
+  for (const entry of entries) add(entry);
+  for (const entry of String(process.env.PYTHONPATH || "").split(path.delimiter)) add(entry);
+
+  return deduped.join(path.delimiter);
+};
+
+const buildPythonEnv = (pythonPathEntries = []) => {
+  const env = { ...process.env };
+  const mergedPath = mergePythonPath(pythonPathEntries);
+  if (mergedPath) {
+    env.PYTHONPATH = mergedPath;
+  }
+  return env;
+};
+
+const isValidModuleIdentifier = (value) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(value);
+
+const parseImportedModules = (codeText) => {
+  if (typeof codeText !== "string" || !codeText.trim()) return [];
+
+  const modules = new Set();
+  const lines = codeText.split(/\r?\n/);
+  for (const rawLine of lines) {
+    const line = rawLine.split("#")[0];
+    if (!line.trim()) continue;
+
+    const importMatch = line.match(/^\s*import\s+(.+)$/);
+    if (importMatch?.[1]) {
+      const tokens = importMatch[1].split(",");
+      for (const token of tokens) {
+        const withoutAlias = token.split(/\s+as\s+/i)[0].trim();
+        const root = withoutAlias.split(".")[0].trim();
+        if (isValidModuleIdentifier(root)) modules.add(root);
+      }
+      continue;
+    }
+
+    const fromMatch = line.match(/^\s*from\s+([A-Za-z_][A-Za-z0-9_\.]*)\s+import\s+/);
+    if (fromMatch?.[1]) {
+      const root = fromMatch[1].split(".")[0].trim();
+      if (isValidModuleIdentifier(root)) modules.add(root);
+    }
+  }
+
+  modules.delete("__future__");
+  return [...modules].sort();
+};
+
+const collectLocalWorkspaceModuleRoots = (workspaceFiles = []) => {
+  const roots = new Set();
+  for (const file of workspaceFiles) {
+    if (!file || typeof file.path !== "string") continue;
+    const segments = file.path.replace(/\\/g, "/").split("/").filter(Boolean);
+    if (!segments.length) continue;
+    const first = segments[0];
+    if (/\.py$/i.test(first)) {
+      const moduleName = first.slice(0, -3);
+      if (isValidModuleIdentifier(moduleName)) roots.add(moduleName);
+      continue;
+    }
+    if (!first.includes(".") && isValidModuleIdentifier(first)) {
+      roots.add(first);
+    }
+  }
+  return roots;
+};
+
+const canImportModule = (moduleName, pythonPathEntries = []) => {
+  const probe = spawnSync(
+    "python",
+    [
+      "-c",
+      "import importlib.util,sys;sys.exit(0 if importlib.util.find_spec(sys.argv[1]) else 1)",
+      moduleName,
+    ],
+    {
+      env: buildPythonEnv(pythonPathEntries),
+      stdio: "ignore",
+      timeout: MODULE_CHECK_TIMEOUT_MS,
+    }
+  );
+  return probe.status === 0;
+};
+
+const sanitizeCacheDirName = (value) => normalizePackageName(value).replace(/[^a-z0-9._-]/g, "-");
+
+const getPackageCacheDir = (packageName) =>
+  path.join(PY_DEPS_CACHE_ROOT, sanitizeCacheDirName(packageName));
+
+const installPipPackage = (packageName, pythonPathEntries = []) => {
+  const normalized = normalizePackageName(packageName);
+  if (!/^[a-z0-9][a-z0-9._-]*$/.test(normalized)) {
+    throw invalidInputError(`Invalid package name '${packageName}'.`);
+  }
+
+  const targetDir = getPackageCacheDir(packageName);
+  fs.mkdirSync(targetDir, { recursive: true });
+
+  const install = spawnSync(
+    "python",
+    [
+      "-m",
+      "pip",
+      "install",
+      "--disable-pip-version-check",
+      "--no-input",
+      "--target",
+      targetDir,
+      packageName,
+    ],
+    {
+      env: buildPythonEnv(pythonPathEntries),
+      encoding: "utf8",
+      timeout: PIP_INSTALL_TIMEOUT_MS,
+      maxBuffer: 8 * 1024 * 1024,
+    }
+  );
+
+  if (install.status === 0) {
+    return targetDir;
+  }
+
+  if (install.error?.code === "ETIMEDOUT") {
+    throw invalidInputError(`Installing '${packageName}' timed out.`);
+  }
+
+  const details = (install.stderr || install.stdout || install.error?.message || "")
+    .toString()
+    .trim();
+  throw invalidInputError(
+    `Failed to install package '${packageName}'.${details ? ` ${details.slice(0, 300)}` : ""}`
+  );
+};
+
+const resolvePackageCandidates = (moduleName) => {
+  const candidates = [];
+  const mapped = IMPORT_TO_PIP_PACKAGE[moduleName.toLowerCase()];
+  if (mapped) candidates.push(mapped);
+  candidates.push(moduleName);
+
+  const seen = new Set();
+  return candidates.filter((candidate) => {
+    const key = normalizePackageName(candidate);
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+};
+
+const ensureRuntimeDependencies = ({ source, workspaceFiles }) => {
+  const requestedModules = new Set(parseImportedModules(source));
+  for (const file of workspaceFiles || []) {
+    for (const mod of parseImportedModules(file?.content)) {
+      requestedModules.add(mod);
+    }
+  }
+  if (!requestedModules.size) return [];
+
+  const localRoots = collectLocalWorkspaceModuleRoots(workspaceFiles);
+  const pythonPathEntries = [];
+
+  for (const moduleName of [...requestedModules].sort()) {
+    if (localRoots.has(moduleName)) continue;
+    if (canImportModule(moduleName, pythonPathEntries)) continue;
+
+    if (PYPI_INSTALL_POLICY === "disabled") {
+      throw invalidInputError(
+        `Module '${moduleName}' is not installed. Web package installs are disabled on this server.`
+      );
+    }
+
+    const candidates = resolvePackageCandidates(moduleName);
+    let installed = false;
+    let lastError = null;
+
+    for (const packageName of candidates) {
+      const normalizedPackage = normalizePackageName(packageName);
+      if (PYPI_INSTALL_POLICY === "allowlist" && !PYPI_ALLOWLIST.has(normalizedPackage)) {
+        lastError = invalidInputError(
+          `Package '${packageName}' is blocked by server allowlist policy.`
+        );
+        continue;
+      }
+
+      const cachedDir = getPackageCacheDir(packageName);
+      if (!pythonPathEntries.includes(cachedDir)) {
+        pythonPathEntries.push(cachedDir);
+      }
+      if (canImportModule(moduleName, pythonPathEntries)) {
+        installed = true;
+        break;
+      }
+
+      try {
+        const targetDir = installPipPackage(packageName, pythonPathEntries);
+        if (!pythonPathEntries.includes(targetDir)) {
+          pythonPathEntries.push(targetDir);
+        }
+        if (canImportModule(moduleName, pythonPathEntries)) {
+          installed = true;
+          break;
+        }
+      } catch (err) {
+        lastError = err;
+      }
+    }
+
+    if (!installed) {
+      if (lastError) throw lastError;
+      throw invalidInputError(`Unable to resolve module '${moduleName}'.`);
+    }
+  }
+
+  return pythonPathEntries;
 };
 
 const isValidPathSegment = (segment) =>
@@ -283,10 +542,12 @@ const runPython = async (req, res) => {
     const target = createExecutionTarget(context);
     tempFile = target.tempFile;
     tempDir = target.tempDir;
+    const dependencyPythonPaths = ensureRuntimeDependencies(context);
 
     const child = spawn("python", ["-u", tempFile], {
       stdio: ["pipe", "pipe", "pipe"],
       cwd: tempDir || path.dirname(tempFile),
+      env: buildPythonEnv(dependencyPythonPaths),
     });
 
     let stdout = "";
@@ -361,10 +622,12 @@ const startRunSession = async (req, res) => {
     const target = createExecutionTarget(context);
     tempFile = target.tempFile;
     tempDir = target.tempDir;
+    const dependencyPythonPaths = ensureRuntimeDependencies(context);
 
     const child = spawn("python", ["-u", tempFile], {
       stdio: ["pipe", "pipe", "pipe"],
       cwd: tempDir || path.dirname(tempFile),
+      env: buildPythonEnv(dependencyPythonPaths),
     });
     const sessionId = randomUUID();
 
