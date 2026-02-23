@@ -9,6 +9,7 @@ import ConsolePanel from "../components/ConsolePanel";
 import { apiRequest } from "../lib/api";
 import { findNode, flattenFiles } from "../lib/tree";
 import { applyVscodeTheme, editorOptions } from "../lib/monaco";
+import { downloadPyFile } from "../lib/download";
 import useInteractiveRun from "../hooks/useInteractiveRun";
 
 const createNodeId = () => {
@@ -265,6 +266,17 @@ export default function ProblemSolver() {
     } catch (err) {
       setFileError(err.message || "Unable to run code");
     }
+  };
+
+  const downloadActiveFile = () => {
+    if (!activeFile || activeFile.type !== "file") {
+      setFileError("Select a file tab to download.");
+      return;
+    }
+
+    setFileError("");
+    const content = (editorValue ?? "").length ? editorValue : activeFile.content || "";
+    downloadPyFile(activeFile.name || "main.py", content, "main.py");
   };
 
   const submitCode = async () => {
@@ -574,6 +586,13 @@ export default function ProblemSolver() {
                   className="rounded-md border border-slate-700 px-3 py-2 text-xs text-slate-200 hover:border-slate-600 disabled:opacity-50"
                 >
                   {isRunning ? "Running..." : "Run"}
+                </button>
+                <button
+                  onClick={downloadActiveFile}
+                  disabled={!activeFileId}
+                  className="rounded-md border border-slate-700 px-3 py-2 text-xs text-slate-200 hover:border-slate-600 disabled:opacity-50"
+                >
+                  Download .py
                 </button>
                 <button
                   onClick={submitCode}

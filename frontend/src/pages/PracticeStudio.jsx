@@ -8,6 +8,7 @@ import Modal from "../components/Modal";
 import ConsolePanel from "../components/ConsolePanel";
 import { findNode, flattenFiles } from "../lib/tree";
 import { applyVscodeTheme, editorOptions } from "../lib/monaco";
+import { downloadPyFile, isLikelyPythonPath, toWorkspacePyDownloadName } from "../lib/download";
 import useInteractiveRun from "../hooks/useInteractiveRun";
 
 const STORAGE_KEY = "practice-studio-workspace-v1";
@@ -263,6 +264,31 @@ export default function PracticeStudio() {
     }
   };
 
+  const downloadActiveFile = () => {
+    if (!activeFile || activeFile.type !== "file") {
+      setFileError("Select a file tab to download.");
+      return;
+    }
+
+    setFileError("");
+    const content = (editorValue ?? "").length ? editorValue : activeFile.content || "";
+    downloadPyFile(activeFile.name || "main.py", content, "main.py");
+  };
+
+  const downloadWorkspacePyFiles = () => {
+    const workspacePayload = buildWorkspaceRunPayload(tree, activeFileId);
+    const pythonFiles = workspacePayload.files.filter((file) => isLikelyPythonPath(file.path));
+    if (!pythonFiles.length) {
+      setFileError("No Python files found in the workspace.");
+      return;
+    }
+
+    setFileError("");
+    for (const file of pythonFiles) {
+      downloadPyFile(toWorkspacePyDownloadName(file.path), file.content || "", "main.py");
+    }
+  };
+
   const handleSelectFile = (node) => {
     if (node.type !== "file") return;
     setActiveFileId(node.id);
@@ -408,6 +434,20 @@ export default function PracticeStudio() {
                 className="rounded-md border border-slate-700 px-3 py-2 text-xs text-slate-200 hover:border-slate-600"
               >
                 Reset
+              </button>
+              <button
+                onClick={downloadActiveFile}
+                disabled={!activeFileId}
+                className="rounded-md border border-slate-700 px-3 py-2 text-xs text-slate-200 hover:border-slate-600 disabled:opacity-50"
+              >
+                Download .py
+              </button>
+              <button
+                onClick={downloadWorkspacePyFiles}
+                disabled={!tree.length}
+                className="rounded-md border border-slate-700 px-3 py-2 text-xs text-slate-200 hover:border-slate-600 disabled:opacity-50"
+              >
+                Download All .py
               </button>
               <button
                 onClick={runCode}
