@@ -50,6 +50,17 @@ const pickChallengeProblems = (problemIds, challengeIndex, countPerChallenge = 1
 };
 
 const round2 = (value) => Math.round(value * 100) / 100;
+const hasOwn = (obj, key) => Object.prototype.hasOwnProperty.call(obj || {}, key);
+
+const normalizeSingleLine = (value, maxLength) =>
+  String(value || "")
+    .trim()
+    .slice(0, maxLength);
+
+const normalizeMultiline = (value, maxLength) =>
+  String(value || "")
+    .replace(/\r/g, "")
+    .slice(0, maxLength);
 
 const listTopics = async (req, res) => {
   const topics = await Topic.find().sort({ order: 1 });
@@ -257,6 +268,142 @@ const seedTopicContentFromWeb = async (req, res) => {
     updatedTopics,
     updatedLessons,
     report,
+  });
+};
+
+const updateTopicContent = async (req, res) => {
+  const user = await User.findById(req.user?.id).select("role");
+  if (!user || user.role !== "teacher") {
+    return res.status(403).json({ error: "Teacher access required" });
+  }
+
+  const topic = await Topic.findById(req.params.id);
+  if (!topic) {
+    return res.status(404).json({ error: "Topic not found" });
+  }
+
+  let changed = false;
+
+  if (hasOwn(req.body, "title")) {
+    const title = normalizeSingleLine(req.body.title, 120);
+    if (!title) {
+      return res.status(400).json({ error: "Topic title cannot be empty" });
+    }
+    topic.title = title;
+    changed = true;
+  }
+
+  if (hasOwn(req.body, "description")) {
+    topic.description = normalizeMultiline(req.body.description, 6000).trim();
+    changed = true;
+  }
+
+  if (hasOwn(req.body, "lessons") && !Array.isArray(req.body.lessons)) {
+    return res.status(400).json({ error: "Lessons must be an array" });
+  }
+
+  if (Array.isArray(req.body?.lessons)) {
+    const lessonMap = new Map((topic.lessons || []).map((lesson) => [String(lesson.id), lesson]));
+    const seen = new Set();
+
+    for (const patch of req.body.lessons) {
+      const lessonId = normalizeSingleLine(patch?.id, 80);
+      if (!lessonId) {
+        return res.status(400).json({ error: "Each lesson update must include a valid id" });
+      }
+      if (seen.has(lessonId)) {
+        return res.status(400).json({ error: `Duplicate lesson id '${lessonId}' in payload` });
+      }
+      seen.add(lessonId);
+
+      const lesson = lessonMap.get(lessonId);
+      if (!lesson) {
+        return res.status(404).json({ error: `Lesson not found for id '${lessonId}'` });
+      }
+
+      if (hasOwn(patch, "title")) {
+        const lessonTitle = normalizeSingleLine(patch.title, 160);
+        if (!lessonTitle) {
+          return res.status(400).json({ error: "Lesson title cannot be empty" });
+        }
+        lesson.title = lessonTitle;
+        changed = true;
+      }
+
+      if (hasOwn(patch, "content")) {
+        lesson.content = normalizeMultiline(patch.content, 50000);
+        changed = true;
+      }
+
+      if (hasOwn(patch, "order")) {
+        const parsedOrder = Number(patch.order);
+        if (!Number.isInteger(parsedOrder) || parsedOrder < 1 || parsedOrder > 9999) {
+          return res.status(400).json({ error: "Lesson order must be an integer between 1 and 9999" });
+        }
+        lesson.order = parsedOrder;
+        changed = true;
+      }
+    }
+
+    if (req.body.lessons.length > 0) {
+      topic.markModified("lessons");
+    }
+  }
+
+  if (!changed) {
+    return res.status(400).json({ error: "No valid fields to update" });
+  }
+
+  await topic.save();
+  return res.json({ message: "Topic content updated", topic });
+};
+
+const resetSeededCurriculum = async (req, res) => {
+  const user = await User.findById(req.user?.id).select("role");
+  if (!user || user.role !== "teacher") {
+    return res.status(403).json({ error: "Teacher access required" });
+  }
+
+  if (process.env.ALLOW_SEED_FORCE_RESET !== "true") {
+    return res.status(403).json({
+      error: "Curriculum reset is disabled. Set ALLOW_SEED_FORCE_RESET=true to enable it.",
+    });
+  }
+
+  if (req.body?.confirm !== "RESET_CURRICULUM") {
+    return res.status(400).json({
+      error: "Reset not confirmed. Send {\"confirm\":\"RESET_CURRICULUM\"} in request body.",
+    });
+  }
+
+  const [problemDocs, challengeDocs] = await Promise.all([
+    Problem.find().select("_id").lean(),
+    Challenge.find().select("_id").lean(),
+  ]);
+  const problemIds = problemDocs.map((doc) => doc._id);
+  const challengeIds = challengeDocs.map((doc) => doc._id);
+
+  const submissionFilters = [];
+  if (problemIds.length) submissionFilters.push({ problemId: { $in: problemIds } });
+  if (challengeIds.length) submissionFilters.push({ challengeId: { $in: challengeIds } });
+
+  const [topicsResult, problemsResult, challengesResult, submissionsResult] = await Promise.all([
+    Topic.deleteMany({}),
+    Problem.deleteMany({}),
+    Challenge.deleteMany({}),
+    submissionFilters.length
+      ? Submission.deleteMany({ $or: submissionFilters })
+      : Promise.resolve({ deletedCount: 0 }),
+  ]);
+
+  return res.json({
+    message: "Seeded curriculum removed",
+    deleted: {
+      topics: topicsResult.deletedCount || 0,
+      problems: problemsResult.deletedCount || 0,
+      challenges: challengesResult.deletedCount || 0,
+      submissions: submissionsResult.deletedCount || 0,
+    },
   });
 };
 
@@ -824,4 +971,6 @@ module.exports = {
   seedPython,
   seedChallenges,
   seedTopicContentFromWeb,
+  updateTopicContent,
+  resetSeededCurriculum,
 };

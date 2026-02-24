@@ -1,24 +1,126 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Navbar from "../components/Navbar";
 import { apiRequest } from "../lib/api";
 
 export default function TeacherAdmin() {
   const [students, setStudents] = useState([]);
+  const [topics, setTopics] = useState([]);
+  const [selectedTopicId, setSelectedTopicId] = useState("");
+  const [selectedLessonId, setSelectedLessonId] = useState("");
+  const [topicTitle, setTopicTitle] = useState("");
+  const [topicDescription, setTopicDescription] = useState("");
+  const [lessonTitle, setLessonTitle] = useState("");
+  const [lessonContent, setLessonContent] = useState("");
+  const [topicsLoading, setTopicsLoading] = useState(true);
   const [error, setError] = useState("");
   const [adminMessage, setAdminMessage] = useState("");
   const [importingContent, setImportingContent] = useState(false);
+  const [savingTopic, setSavingTopic] = useState(false);
+  const [savingLesson, setSavingLesson] = useState(false);
+  const [resettingCurriculum, setResettingCurriculum] = useState(false);
+
+  const orderedTopics = useMemo(
+    () => [...topics].sort((a, b) => (a.order || 0) - (b.order || 0)),
+    [topics]
+  );
+  const selectedTopic = useMemo(
+    () => orderedTopics.find((topic) => topic._id === selectedTopicId) || null,
+    [orderedTopics, selectedTopicId]
+  );
+  const orderedLessons = useMemo(
+    () => [...(selectedTopic?.lessons || [])].sort((a, b) => (a.order || 0) - (b.order || 0)),
+    [selectedTopic]
+  );
+  const selectedLesson = useMemo(
+    () => orderedLessons.find((lesson) => lesson.id === selectedLessonId) || null,
+    [orderedLessons, selectedLessonId]
+  );
+
+  const syncTopicSelection = (topicList, preferredTopicId = "", preferredLessonId = "") => {
+    if (!topicList.length) {
+      setSelectedTopicId("");
+      setSelectedLessonId("");
+      return;
+    }
+
+    const topicId = topicList.some((topic) => topic._id === preferredTopicId)
+      ? preferredTopicId
+      : topicList[0]._id;
+    setSelectedTopicId(topicId);
+
+    const topic = topicList.find((item) => item._id === topicId);
+    const lessons = [...(topic?.lessons || [])].sort((a, b) => (a.order || 0) - (b.order || 0));
+    if (!lessons.length) {
+      setSelectedLessonId("");
+      return;
+    }
+    const lessonId = lessons.some((lesson) => lesson.id === preferredLessonId)
+      ? preferredLessonId
+      : lessons[0].id;
+    setSelectedLessonId(lessonId);
+  };
+
+  const refreshTopics = async (preferredTopicId = selectedTopicId, preferredLessonId = selectedLessonId) => {
+    const data = await apiRequest("/api/topics");
+    const sorted = [...(data || [])].sort((a, b) => (a.order || 0) - (b.order || 0));
+    setTopics(sorted);
+    syncTopicSelection(sorted, preferredTopicId, preferredLessonId);
+  };
 
   useEffect(() => {
     const load = async () => {
+      setTopicsLoading(true);
       try {
-        const data = await apiRequest("/api/teacher/students");
-        setStudents(data.students || []);
+        const [studentsData, topicsData] = await Promise.all([
+          apiRequest("/api/teacher/students"),
+          apiRequest("/api/topics"),
+        ]);
+        setStudents(studentsData.students || []);
+        const sorted = [...(topicsData || [])].sort((a, b) => (a.order || 0) - (b.order || 0));
+        setTopics(sorted);
+        syncTopicSelection(sorted);
       } catch (err) {
         setError(err.message);
+      } finally {
+        setTopicsLoading(false);
       }
     };
     load();
   }, []);
+
+  useEffect(() => {
+    if (!selectedTopic) {
+      setTopicTitle("");
+      setTopicDescription("");
+      return;
+    }
+    setTopicTitle(selectedTopic.title || "");
+    setTopicDescription(selectedTopic.description || "");
+  }, [selectedTopic]);
+
+  useEffect(() => {
+    if (!selectedTopic) {
+      if (selectedLessonId) setSelectedLessonId("");
+      return;
+    }
+    if (!orderedLessons.length) {
+      if (selectedLessonId) setSelectedLessonId("");
+      return;
+    }
+    if (!orderedLessons.some((lesson) => lesson.id === selectedLessonId)) {
+      setSelectedLessonId(orderedLessons[0].id);
+    }
+  }, [selectedTopic, orderedLessons, selectedLessonId]);
+
+  useEffect(() => {
+    if (!selectedLesson) {
+      setLessonTitle("");
+      setLessonContent("");
+      return;
+    }
+    setLessonTitle(selectedLesson.title || "");
+    setLessonContent(selectedLesson.content || "");
+  }, [selectedLesson]);
 
   const seedCurriculum = async () => {
     setError("");
@@ -26,6 +128,7 @@ export default function TeacherAdmin() {
     try {
       const res = await apiRequest("/api/seed/python", { method: "POST" });
       setAdminMessage(res.message || "Curriculum seeded.");
+      await refreshTopics();
     } catch (err) {
       setError(err.message);
     }
@@ -66,10 +169,87 @@ export default function TeacherAdmin() {
           res.updatedTopics || 0
         } topics.`
       );
+      await refreshTopics();
     } catch (err) {
       setError(err.message);
     } finally {
       setImportingContent(false);
+    }
+  };
+
+  const saveTopicHeader = async () => {
+    if (!selectedTopicId) return;
+    setError("");
+    setAdminMessage("");
+    setSavingTopic(true);
+    try {
+      await apiRequest(`/api/topics/${selectedTopicId}/content`, {
+        method: "PUT",
+        body: JSON.stringify({
+          title: topicTitle,
+          description: topicDescription,
+        }),
+      });
+      setAdminMessage("Topic title and description updated.");
+      await refreshTopics(selectedTopicId, selectedLessonId);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setSavingTopic(false);
+    }
+  };
+
+  const saveLessonDraft = async () => {
+    if (!selectedTopicId || !selectedLessonId) return;
+    setError("");
+    setAdminMessage("");
+    setSavingLesson(true);
+    try {
+      await apiRequest(`/api/topics/${selectedTopicId}/content`, {
+        method: "PUT",
+        body: JSON.stringify({
+          lessons: [
+            {
+              id: selectedLessonId,
+              title: lessonTitle,
+              content: lessonContent,
+            },
+          ],
+        }),
+      });
+      setAdminMessage("Lesson content updated.");
+      await refreshTopics(selectedTopicId, selectedLessonId);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setSavingLesson(false);
+    }
+  };
+
+  const resetCurriculum = async () => {
+    const confirmed = confirm(
+      "Delete all topics, problems, challenges, and linked submissions from seeded curriculum?"
+    );
+    if (!confirmed) return;
+
+    setError("");
+    setAdminMessage("");
+    setResettingCurriculum(true);
+    try {
+      const res = await apiRequest("/api/seed/python", {
+        method: "DELETE",
+        body: JSON.stringify({ confirm: "RESET_CURRICULUM" }),
+      });
+      setAdminMessage(
+        `Removed ${res.deleted?.topics || 0} topics, ${res.deleted?.problems || 0} problems, ${
+          res.deleted?.challenges || 0
+        } challenges.`
+      );
+      await refreshTopics();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setResettingCurriculum(false);
     }
   };
 
@@ -104,46 +284,156 @@ export default function TeacherAdmin() {
             >
               Create 20 Challenges
             </button>
+            <button
+              onClick={resetCurriculum}
+              disabled={resettingCurriculum}
+              className="rounded-md border border-rose-500/50 px-3 py-2 text-xs text-rose-200 hover:border-rose-400 disabled:opacity-50"
+            >
+              {resettingCurriculum ? "Removing..." : "Remove Seeded Curriculum"}
+            </button>
           </div>
         </div>
         {adminMessage && <div className="mt-3 text-sm text-emerald-300">{adminMessage}</div>}
         {error && <div className="mt-4 text-sm text-rose-400">{error}</div>}
 
-        <div className="mt-6 overflow-hidden rounded-2xl border border-slate-800 bg-slate-900/60">
-          <table className="w-full text-left text-sm">
-            <thead className="bg-slate-900 text-slate-400">
-              <tr>
-                <th className="px-4 py-3">Student</th>
-                <th className="px-4 py-3">Solved</th>
-                <th className="px-4 py-3">Submissions</th>
-                <th className="px-4 py-3">Last Submission</th>
-              </tr>
-            </thead>
-            <tbody>
-              {students.map((student) => (
-                <tr key={student.id} className="border-t border-slate-800">
-                  <td className="px-4 py-3">
-                    <div className="text-white">{student.name}</div>
-                    <div className="text-xs text-slate-500">{student.email}</div>
-                  </td>
-                  <td className="px-4 py-3">{student.solvedCount}</td>
-                  <td className="px-4 py-3">{student.submissions}</td>
-                  <td className="px-4 py-3 text-xs text-slate-400">
-                    {student.lastSubmission
-                      ? new Date(student.lastSubmission).toLocaleString()
-                      : "-"}
-                  </td>
-                </tr>
-              ))}
-              {students.length === 0 && (
+        <div className="mt-6 grid gap-6 lg:grid-cols-[minmax(0,1fr)_380px]">
+          <div className="overflow-hidden rounded-2xl border border-slate-800 bg-slate-900/60">
+            <table className="w-full text-left text-sm">
+              <thead className="bg-slate-900 text-slate-400">
                 <tr>
-                  <td colSpan="4" className="px-4 py-6 text-center text-slate-400">
-                    No students yet.
-                  </td>
+                  <th className="px-4 py-3">Student</th>
+                  <th className="px-4 py-3">Solved</th>
+                  <th className="px-4 py-3">Submissions</th>
+                  <th className="px-4 py-3">Last Submission</th>
                 </tr>
-              )}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {students.map((student) => (
+                  <tr key={student.id} className="border-t border-slate-800">
+                    <td className="px-4 py-3">
+                      <div className="text-white">{student.name}</div>
+                      <div className="text-xs text-slate-500">{student.email}</div>
+                    </td>
+                    <td className="px-4 py-3">{student.solvedCount}</td>
+                    <td className="px-4 py-3">{student.submissions}</td>
+                    <td className="px-4 py-3 text-xs text-slate-400">
+                      {student.lastSubmission
+                        ? new Date(student.lastSubmission).toLocaleString()
+                        : "-"}
+                    </td>
+                  </tr>
+                ))}
+                {students.length === 0 && (
+                  <tr>
+                    <td colSpan="4" className="px-4 py-6 text-center text-slate-400">
+                      No students yet.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-4">
+            <div className="text-sm font-semibold text-emerald-200">Topic Content Editor</div>
+            <div className="mt-1 text-xs text-slate-400">
+              Manually type topic descriptions and lesson text shown to students.
+            </div>
+
+            <div className="mt-4 space-y-4">
+              <div>
+                <label className="mb-1 block text-xs text-slate-400">Topic</label>
+                <select
+                  value={selectedTopicId}
+                  onChange={(e) => setSelectedTopicId(e.target.value)}
+                  className="w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-white outline-none focus:border-emerald-400"
+                >
+                  {!orderedTopics.length && <option value="">No topics found</option>}
+                  {orderedTopics.map((topic) => (
+                    <option key={topic._id} value={topic._id}>
+                      {`Topic ${topic.order}: ${topic.title}`}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="mb-1 block text-xs text-slate-400">Topic Title</label>
+                <input
+                  type="text"
+                  value={topicTitle}
+                  onChange={(e) => setTopicTitle(e.target.value)}
+                  placeholder="Enter topic title"
+                  className="w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-white outline-none focus:border-emerald-400"
+                />
+              </div>
+
+              <div>
+                <label className="mb-1 block text-xs text-slate-400">Topic Description</label>
+                <textarea
+                  rows={4}
+                  value={topicDescription}
+                  onChange={(e) => setTopicDescription(e.target.value)}
+                  placeholder="Enter topic description visible on the Topics page"
+                  className="w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-white outline-none focus:border-emerald-400"
+                />
+              </div>
+
+              <button
+                onClick={saveTopicHeader}
+                disabled={!selectedTopicId || savingTopic || topicsLoading}
+                className="w-full rounded-md border border-emerald-500/40 px-3 py-2 text-xs font-semibold text-emerald-200 hover:border-emerald-400 disabled:opacity-50"
+              >
+                {savingTopic ? "Saving Topic..." : "Save Topic Header"}
+              </button>
+
+              <div className="border-t border-slate-800 pt-4">
+                <label className="mb-1 block text-xs text-slate-400">Lesson</label>
+                <select
+                  value={selectedLessonId}
+                  onChange={(e) => setSelectedLessonId(e.target.value)}
+                  className="w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-white outline-none focus:border-emerald-400"
+                >
+                  {!orderedLessons.length && <option value="">No lessons in this topic</option>}
+                  {orderedLessons.map((lesson) => (
+                    <option key={lesson.id} value={lesson.id}>
+                      {`Lesson ${lesson.order}: ${lesson.title}`}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="mb-1 block text-xs text-slate-400">Lesson Title</label>
+                <input
+                  type="text"
+                  value={lessonTitle}
+                  onChange={(e) => setLessonTitle(e.target.value)}
+                  placeholder="Enter lesson title"
+                  className="w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-white outline-none focus:border-emerald-400"
+                />
+              </div>
+
+              <div>
+                <label className="mb-1 block text-xs text-slate-400">Lesson Content</label>
+                <textarea
+                  rows={9}
+                  value={lessonContent}
+                  onChange={(e) => setLessonContent(e.target.value)}
+                  placeholder="Type lesson content students should read on the topic details page"
+                  className="w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-white outline-none focus:border-emerald-400"
+                />
+              </div>
+
+              <button
+                onClick={saveLessonDraft}
+                disabled={!selectedTopicId || !selectedLesson || savingLesson || topicsLoading}
+                className="w-full rounded-md bg-emerald-500 px-3 py-2 text-xs font-semibold text-slate-950 hover:bg-emerald-400 disabled:opacity-50"
+              >
+                {savingLesson ? "Saving Lesson..." : "Save Lesson Content"}
+              </button>
+            </div>
+          </div>
         </div>
       </div>
     </div>
