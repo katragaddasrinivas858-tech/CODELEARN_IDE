@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import Navbar from "../components/Navbar";
 import { apiRequest } from "../lib/api";
+import LessonRichRenderer from "../components/LessonRichRenderer";
 
 const UPCOMING_COURSES = [
   { title: "System Design Training", startsAt: "Starting from Feb 14, 2026", rating: 4.6 },
@@ -129,6 +130,7 @@ export default function TopicDetail() {
 
   const activeLesson =
     orderedLessons.find((lesson) => lesson.id === activeLessonId) || orderedLessons[0] || null;
+  const hasRichLessonBlocks = Array.isArray(activeLesson?.blocks) && activeLesson.blocks.length > 0;
 
   if (!topic) {
     return (
@@ -210,7 +212,11 @@ export default function TopicDetail() {
                 </div>
                 <h1 className="mt-2 text-4xl font-bold leading-tight text-white">{activeLesson.title}</h1>
                 <div className="mt-6 border-t border-slate-800 pt-6">
-                  {renderLessonContent(activeLesson.content)}
+                  {hasRichLessonBlocks ? (
+                    <LessonRichRenderer blocks={activeLesson.blocks} />
+                  ) : (
+                    renderLessonContent(activeLesson.content)
+                  )}
                 </div>
               </>
             ) : (

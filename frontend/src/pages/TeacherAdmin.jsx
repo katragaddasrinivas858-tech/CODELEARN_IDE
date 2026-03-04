@@ -1,6 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
 import Navbar from "../components/Navbar";
+import RichLessonEditor from "../components/RichLessonEditor";
 import { apiRequest } from "../lib/api";
+import {
+  blocksFromPlainText,
+  lessonBlocksToPlainText,
+  normalizeLessonBlocks,
+} from "../lib/lessonBlocks";
 
 export default function TeacherAdmin() {
   const [students, setStudents] = useState([]);
@@ -10,7 +16,7 @@ export default function TeacherAdmin() {
   const [topicTitle, setTopicTitle] = useState("");
   const [topicDescription, setTopicDescription] = useState("");
   const [lessonTitle, setLessonTitle] = useState("");
-  const [lessonContent, setLessonContent] = useState("");
+  const [lessonBlocks, setLessonBlocks] = useState([]);
   const [topicsLoading, setTopicsLoading] = useState(true);
   const [error, setError] = useState("");
   const [adminMessage, setAdminMessage] = useState("");
@@ -61,7 +67,7 @@ export default function TeacherAdmin() {
   };
 
   const refreshTopics = async (preferredTopicId = selectedTopicId, preferredLessonId = selectedLessonId) => {
-    const data = await apiRequest("/api/topics");
+    const data = await apiRequest("/api/topics?full=true");
     const sorted = [...(data || [])].sort((a, b) => (a.order || 0) - (b.order || 0));
     setTopics(sorted);
     syncTopicSelection(sorted, preferredTopicId, preferredLessonId);
@@ -73,7 +79,7 @@ export default function TeacherAdmin() {
       try {
         const [studentsData, topicsData] = await Promise.all([
           apiRequest("/api/teacher/students"),
-          apiRequest("/api/topics"),
+          apiRequest("/api/topics?full=true"),
         ]);
         setStudents(studentsData.students || []);
         const sorted = [...(topicsData || [])].sort((a, b) => (a.order || 0) - (b.order || 0));
@@ -115,11 +121,17 @@ export default function TeacherAdmin() {
   useEffect(() => {
     if (!selectedLesson) {
       setLessonTitle("");
-      setLessonContent("");
+      setLessonBlocks([]);
       return;
     }
+
     setLessonTitle(selectedLesson.title || "");
-    setLessonContent(selectedLesson.content || "");
+    const normalized = normalizeLessonBlocks(selectedLesson.blocks);
+    if (normalized.length) {
+      setLessonBlocks(normalized);
+      return;
+    }
+    setLessonBlocks(blocksFromPlainText(selectedLesson.content || ""));
   }, [selectedLesson]);
 
   const seedCurriculum = async () => {
@@ -205,6 +217,7 @@ export default function TeacherAdmin() {
     setAdminMessage("");
     setSavingLesson(true);
     try {
+      const normalizedBlocks = normalizeLessonBlocks(lessonBlocks);
       await apiRequest(`/api/topics/${selectedTopicId}/content`, {
         method: "PUT",
         body: JSON.stringify({
@@ -212,7 +225,8 @@ export default function TeacherAdmin() {
             {
               id: selectedLessonId,
               title: lessonTitle,
-              content: lessonContent,
+              content: lessonBlocksToPlainText(normalizedBlocks),
+              blocks: normalizedBlocks,
             },
           ],
         }),
@@ -256,15 +270,15 @@ export default function TeacherAdmin() {
   return (
     <div className="min-h-screen bg-slate-950 text-white">
       <Navbar />
-      <div className="mx-auto max-w-6xl px-6 py-10">
+      <div className="mx-auto max-w-7xl px-6 py-10">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <div className="text-2xl font-semibold">Teacher Admin</div>
             <div className="text-sm text-slate-400">
-              Track student progress, seed content, and launch ranked challenges.
+              Track student progress, seed rich lesson content, and launch ranked challenges.
             </div>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <button
               onClick={seedCurriculum}
               className="rounded-md border border-slate-700 px-3 py-2 text-xs text-slate-200 hover:border-slate-500"
@@ -296,7 +310,7 @@ export default function TeacherAdmin() {
         {adminMessage && <div className="mt-3 text-sm text-emerald-300">{adminMessage}</div>}
         {error && <div className="mt-4 text-sm text-rose-400">{error}</div>}
 
-        <div className="mt-6 grid gap-6 lg:grid-cols-[minmax(0,1fr)_380px]">
+        <div className="mt-6 grid gap-6 lg:grid-cols-[340px_minmax(0,1fr)]">
           <div className="overflow-hidden rounded-2xl border border-slate-800 bg-slate-900/60">
             <table className="w-full text-left text-sm">
               <thead className="bg-slate-900 text-slate-400">
@@ -335,12 +349,12 @@ export default function TeacherAdmin() {
           </div>
 
           <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-4">
-            <div className="text-sm font-semibold text-emerald-200">Topic Content Editor</div>
+            <div className="text-sm font-semibold text-emerald-200">Rich Topic Content Editor</div>
             <div className="mt-1 text-xs text-slate-400">
-              Manually type topic descriptions and lesson text shown to students.
+              Build lesson pages with headings, images, and runnable Python code snippets.
             </div>
 
-            <div className="mt-4 space-y-4">
+            <div className="mt-4 grid gap-4 lg:grid-cols-2">
               <div>
                 <label className="mb-1 block text-xs text-slate-400">Topic</label>
                 <select
@@ -358,36 +372,6 @@ export default function TeacherAdmin() {
               </div>
 
               <div>
-                <label className="mb-1 block text-xs text-slate-400">Topic Title</label>
-                <input
-                  type="text"
-                  value={topicTitle}
-                  onChange={(e) => setTopicTitle(e.target.value)}
-                  placeholder="Enter topic title"
-                  className="w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-white outline-none focus:border-emerald-400"
-                />
-              </div>
-
-              <div>
-                <label className="mb-1 block text-xs text-slate-400">Topic Description</label>
-                <textarea
-                  rows={4}
-                  value={topicDescription}
-                  onChange={(e) => setTopicDescription(e.target.value)}
-                  placeholder="Enter topic description visible on the Topics page"
-                  className="w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-white outline-none focus:border-emerald-400"
-                />
-              </div>
-
-              <button
-                onClick={saveTopicHeader}
-                disabled={!selectedTopicId || savingTopic || topicsLoading}
-                className="w-full rounded-md border border-emerald-500/40 px-3 py-2 text-xs font-semibold text-emerald-200 hover:border-emerald-400 disabled:opacity-50"
-              >
-                {savingTopic ? "Saving Topic..." : "Save Topic Header"}
-              </button>
-
-              <div className="border-t border-slate-800 pt-4">
                 <label className="mb-1 block text-xs text-slate-400">Lesson</label>
                 <select
                   value={selectedLessonId}
@@ -402,6 +386,19 @@ export default function TeacherAdmin() {
                   ))}
                 </select>
               </div>
+            </div>
+
+            <div className="mt-4 grid gap-4 lg:grid-cols-2">
+              <div>
+                <label className="mb-1 block text-xs text-slate-400">Topic Title</label>
+                <input
+                  type="text"
+                  value={topicTitle}
+                  onChange={(e) => setTopicTitle(e.target.value)}
+                  placeholder="Enter topic title"
+                  className="w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-white outline-none focus:border-emerald-400"
+                />
+              </div>
 
               <div>
                 <label className="mb-1 block text-xs text-slate-400">Lesson Title</label>
@@ -413,25 +410,42 @@ export default function TeacherAdmin() {
                   className="w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-white outline-none focus:border-emerald-400"
                 />
               </div>
+            </div>
 
-              <div>
-                <label className="mb-1 block text-xs text-slate-400">Lesson Content</label>
-                <textarea
-                  rows={9}
-                  value={lessonContent}
-                  onChange={(e) => setLessonContent(e.target.value)}
-                  placeholder="Type lesson content students should read on the topic details page"
-                  className="w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-white outline-none focus:border-emerald-400"
-                />
-              </div>
+            <div className="mt-4">
+              <label className="mb-1 block text-xs text-slate-400">Topic Description</label>
+              <textarea
+                rows={3}
+                value={topicDescription}
+                onChange={(e) => setTopicDescription(e.target.value)}
+                placeholder="Enter topic description visible on the Topics page"
+                className="w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-white outline-none focus:border-emerald-400"
+              />
+            </div>
 
+            <div className="mt-4 flex flex-wrap items-center gap-2">
+              <button
+                onClick={saveTopicHeader}
+                disabled={!selectedTopicId || savingTopic || topicsLoading}
+                className="rounded-md border border-emerald-500/40 px-3 py-2 text-xs font-semibold text-emerald-200 hover:border-emerald-400 disabled:opacity-50"
+              >
+                {savingTopic ? "Saving Topic..." : "Save Topic Header"}
+              </button>
               <button
                 onClick={saveLessonDraft}
                 disabled={!selectedTopicId || !selectedLesson || savingLesson || topicsLoading}
-                className="w-full rounded-md bg-emerald-500 px-3 py-2 text-xs font-semibold text-slate-950 hover:bg-emerald-400 disabled:opacity-50"
+                className="rounded-md bg-emerald-500 px-3 py-2 text-xs font-semibold text-slate-950 hover:bg-emerald-400 disabled:opacity-50"
               >
-                {savingLesson ? "Saving Lesson..." : "Save Lesson Content"}
+                {savingLesson ? "Saving Lesson..." : "Save Lesson Page"}
               </button>
+            </div>
+
+            <div className="mt-4">
+              <RichLessonEditor
+                blocks={lessonBlocks}
+                onChange={setLessonBlocks}
+                disabled={!selectedTopicId || !selectedLesson || topicsLoading}
+              />
             </div>
           </div>
         </div>

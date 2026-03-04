@@ -5,6 +5,7 @@ const LessonSchema = new mongoose.Schema(
     id: { type: String, required: true },
     title: { type: String, required: true },
     content: { type: String, default: "" },
+    blocks: { type: [mongoose.Schema.Types.Mixed], default: [] },
     order: { type: Number, default: 0 },
   },
   { _id: false }

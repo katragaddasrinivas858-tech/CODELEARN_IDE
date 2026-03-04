@@ -51,6 +51,10 @@ const pickChallengeProblems = (problemIds, challengeIndex, countPerChallenge = 1
 
 const round2 = (value) => Math.round(value * 100) / 100;
 const hasOwn = (obj, key) => Object.prototype.hasOwnProperty.call(obj || {}, key);
+const LESSON_BLOCK_TYPES = new Set(["heading", "paragraph", "image", "code"]);
+const MAX_LESSON_BLOCKS = 120;
+const MAX_LESSON_BLOCK_BYTES = 8 * 1024 * 1024;
+const MAX_LESSON_IMAGE_DATA_URL_LENGTH = 2_500_000;
 
 const normalizeSingleLine = (value, maxLength) =>
   String(value || "")
@@ -62,8 +66,155 @@ const normalizeMultiline = (value, maxLength) =>
     .replace(/\r/g, "")
     .slice(0, maxLength);
 
+const clampInteger = (value, min, max, fallback) => {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(max, Math.max(min, Math.round(parsed)));
+};
+
+const isSafeImageSource = (value) => {
+  const source = String(value || "").trim();
+  if (!source) return false;
+
+  if (/^https?:\/\/\S+$/i.test(source)) {
+    return source.length <= 2000;
+  }
+
+  if (!/^data:image\//i.test(source)) return false;
+  const compact = source.replace(/\s+/g, "");
+  return (
+    /^data:image\/[a-z0-9.+-]+;base64,[a-z0-9+/=]+$/i.test(compact) &&
+    compact.length <= MAX_LESSON_IMAGE_DATA_URL_LENGTH
+  );
+};
+
+const lessonBlocksToText = (blocks = []) => {
+  const chunks = [];
+  for (const block of blocks) {
+    if (block.type === "heading" && block.text) {
+      chunks.push(block.text);
+      continue;
+    }
+
+    if (block.type === "paragraph" && block.text) {
+      chunks.push(block.text);
+      continue;
+    }
+
+    if (block.type === "image" && block.caption) {
+      chunks.push(`Image: ${block.caption}`);
+      continue;
+    }
+
+    if (block.type === "code" && block.code) {
+      chunks.push("Code example:");
+      chunks.push(block.code);
+    }
+  }
+  return normalizeMultiline(chunks.join("\n\n"), 50000);
+};
+
+const sanitizeLessonBlocks = (rawBlocks = []) => {
+  if (!Array.isArray(rawBlocks)) {
+    return { error: "Lesson blocks must be an array" };
+  }
+
+  if (rawBlocks.length > MAX_LESSON_BLOCKS) {
+    return { error: `Lesson blocks cannot exceed ${MAX_LESSON_BLOCKS} items` };
+  }
+
+  const sanitized = [];
+  let encodedLength = 0;
+
+  for (let index = 0; index < rawBlocks.length; index += 1) {
+    const raw = rawBlocks[index];
+    if (!raw || typeof raw !== "object") {
+      return { error: `Invalid block at position ${index + 1}` };
+    }
+
+    const type = normalizeSingleLine(raw.type, 24).toLowerCase();
+    if (!LESSON_BLOCK_TYPES.has(type)) {
+      return { error: `Unsupported lesson block type '${type || "unknown"}'` };
+    }
+
+    const id = normalizeSingleLine(raw.id, 80) || crypto.randomUUID();
+    let block = null;
+
+    if (type === "heading") {
+      const text = normalizeSingleLine(raw.text, 220);
+      if (!text) {
+        return { error: `Heading block at position ${index + 1} cannot be empty` };
+      }
+      block = {
+        id,
+        type,
+        level: clampInteger(raw.level, 2, 4, 2),
+        text,
+      };
+    }
+
+    if (type === "paragraph") {
+      const text = normalizeMultiline(raw.text, 20000).trim();
+      if (!text) continue;
+      block = {
+        id,
+        type,
+        text,
+      };
+    }
+
+    if (type === "image") {
+      const source = String(raw.src || "").trim();
+      const compactSource = /^data:image\//i.test(source) ? source.replace(/\s+/g, "") : source;
+      if (!isSafeImageSource(compactSource)) {
+        return { error: `Image block at position ${index + 1} has an invalid source` };
+      }
+      block = {
+        id,
+        type,
+        src: compactSource,
+        alt: normalizeSingleLine(raw.alt, 200),
+        caption: normalizeSingleLine(raw.caption, 400),
+        width: clampInteger(raw.width, 20, 100, 80),
+      };
+    }
+
+    if (type === "code") {
+      const language = normalizeSingleLine(raw.language || "python", 24).toLowerCase() || "python";
+      if (language !== "python") {
+        return { error: "Only Python code blocks are supported in lessons" };
+      }
+
+      block = {
+        id,
+        type,
+        language: "python",
+        title: normalizeSingleLine(raw.title, 160),
+        code: normalizeMultiline(raw.code, 50000),
+        stdin: normalizeMultiline(raw.stdin, 4000),
+      };
+    }
+
+    if (!block) continue;
+
+    encodedLength += Buffer.byteLength(JSON.stringify(block), "utf8");
+    if (encodedLength > MAX_LESSON_BLOCK_BYTES) {
+      return { error: "Lesson blocks payload is too large" };
+    }
+
+    sanitized.push(block);
+  }
+
+  return { blocks: sanitized };
+};
+
 const listTopics = async (req, res) => {
-  const topics = await Topic.find().sort({ order: 1 });
+  const includeFull = req.query.full === "true";
+  const query = Topic.find().sort({ order: 1 });
+  if (!includeFull) {
+    query.select("title slug description order lessons.id lessons.title lessons.order");
+  }
+  const topics = await query;
   return res.json(topics);
 };
 
@@ -228,6 +379,7 @@ const seedTopicContentFromWeb = async (req, res) => {
           lessonTitle: lesson.title,
         });
         lesson.content = scraped.content;
+        lesson.blocks = [];
         topicChanged = true;
         updatedLessons += 1;
 
@@ -332,6 +484,18 @@ const updateTopicContent = async (req, res) => {
 
       if (hasOwn(patch, "content")) {
         lesson.content = normalizeMultiline(patch.content, 50000);
+        changed = true;
+      }
+
+      if (hasOwn(patch, "blocks")) {
+        const { blocks, error } = sanitizeLessonBlocks(patch.blocks);
+        if (error) {
+          return res.status(400).json({ error });
+        }
+        lesson.blocks = blocks;
+        if (!hasOwn(patch, "content")) {
+          lesson.content = lessonBlocksToText(blocks);
+        }
         changed = true;
       }
 

@@ -65,7 +65,7 @@ app.use(
     },
   })
 );
-app.use(express.json({ limit: "2mb" }));
+app.use(express.json({ limit: "15mb" }));
 app.use("/api", globalApiLimiter);
 app.use("/api/auth", authLimiter);
 app.post("/api/auth/login", loginLimiter);
