@@ -1,4 +1,4 @@
-﻿import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import Editor from "@monaco-editor/react";
 import Navbar from "../components/Navbar";
@@ -9,8 +9,10 @@ import ConsolePanel from "../components/ConsolePanel";
 import { apiRequest } from "../lib/api";
 import { findNode, flattenFiles } from "../lib/tree";
 import { applyVscodeTheme, editorOptions } from "../lib/monaco";
-import { downloadPyFile } from "../lib/download";
+import { downloadCodeFile } from "../lib/download";
 import useInteractiveRun from "../hooks/useInteractiveRun";
+import useLearningLanguage from "../hooks/useLearningLanguage";
+import { getLanguageConfig, normalizeLanguage, withLanguageQuery } from "../lib/languages";
 
 const createNodeId = () => {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
@@ -33,7 +35,9 @@ const createFolder = (name) => ({
   children: [],
 });
 
-const createInitialTree = (starter = "") => [createFile("main.py", starter)];
+const createInitialTree = (starter = "", language = "python") => [
+  createFile(`main.${getLanguageConfig(language).fileExtension}`, starter),
+];
 
 const updateContent = (nodes, nodeId, content) =>
   nodes.map((node) => {
@@ -91,23 +95,34 @@ const nodeContainsId = (node, targetId) => {
   return node.children.some((child) => nodeContainsId(child, targetId));
 };
 
-const formatLiteral = (value) => {
-  if (typeof value === "string") return JSON.stringify(value);
-  return JSON.stringify(value);
-};
-
+const formatLiteral = (value) => JSON.stringify(value);
 const escapeRegExp = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
-const parseParamsFromStarter = (starter, entryName) => {
+const parseParamsFromStarter = (starter, entryName, language = "python") => {
   if (!starter || !entryName) return [];
-  const pattern = new RegExp(`def\\s+${escapeRegExp(entryName)}\\s*\\(([^)]*)\\)`);
+
+  let pattern = null;
+  if (language === "javascript") {
+    pattern = new RegExp(
+      `(function\\s+${escapeRegExp(entryName)}\\s*\\(([^)]*)\\)|${escapeRegExp(
+        entryName
+      )}\\s*\\(([^)]*)\\)\\s*\\{)`
+    );
+  } else if (language === "c") {
+    pattern = new RegExp(`[A-Za-z_][A-Za-z0-9_\\s\\*]*\\b${escapeRegExp(entryName)}\\s*\\(([^)]*)\\)`);
+  } else {
+    pattern = new RegExp(`def\\s+${escapeRegExp(entryName)}\\s*\\(([^)]*)\\)`);
+  }
+
   const match = starter.match(pattern);
   if (!match) return [];
 
-  return match[1]
+  const paramsSection = language === "javascript" ? match[2] || match[3] || "" : match[1] || "";
+  return paramsSection
     .split(",")
     .map((part) => part.trim())
     .filter(Boolean)
+    .filter((part) => part !== "void")
     .filter((part) => part !== "self")
     .map((part) => {
       let name = part.replace(/^\*+/, "").trim();
@@ -115,6 +130,11 @@ const parseParamsFromStarter = (starter, entryName) => {
       if (equalsIndex >= 0) name = name.slice(0, equalsIndex).trim();
       const colonIndex = name.indexOf(":");
       if (colonIndex >= 0) name = name.slice(0, colonIndex).trim();
+      if (language === "c") {
+        const withoutArrays = name.replace(/\[[^\]]*\]/g, "").trim();
+        const tokens = withoutArrays.split(/\s+/).filter(Boolean);
+        name = (tokens[tokens.length - 1] || withoutArrays).replace(/^\*+/, "").trim();
+      }
       return name;
     })
     .filter(Boolean);
@@ -129,18 +149,50 @@ const inferParamsFromTests = (testCases) => {
   return ["value"];
 };
 
-const buildLeetCodeStarter = (problem) => {
+const buildLeetCodeStarter = (problem, language = "python") => {
   if (!problem) return "";
   if (problem.entryType === "class") {
-    return problem.starter || "class Solution:\n    def __init__(self):\n        pass\n";
+    if (problem.starter) return problem.starter;
+    if (language === "c") {
+      return "/* C does not support class-based starter templates. */\n";
+    }
+    if (language === "javascript") {
+      return "class Solution {\n  constructor() {}\n}\n";
+    }
+    return "class Solution:\n    def __init__(self):\n        pass\n";
   }
 
-  const paramsFromStarter = parseParamsFromStarter(problem.starter || "", problem.entryName);
+  const paramsFromStarter = parseParamsFromStarter(problem.starter || "", problem.entryName, language);
   const paramNames = paramsFromStarter.length
     ? paramsFromStarter
     : inferParamsFromTests(problem.testCases || []);
-  const argSection = paramNames.length ? `, ${paramNames.join(", ")}` : "";
 
+  if (language === "c") {
+    const typedParams = paramNames.length
+      ? paramNames.map((name) => `int ${name}`).join(", ")
+      : "void";
+    return [
+      `int ${problem.entryName}(${typedParams}) {`,
+      "  // Write your solution here",
+      "  return 0;",
+      "}",
+      "",
+    ].join("\n");
+  }
+
+  if (language === "javascript") {
+    return [
+      "class Solution {",
+      `  ${problem.entryName}(${paramNames.join(", ")}) {`,
+      "    // Write your solution here",
+      "    return null;",
+      "  }",
+      "}",
+      "",
+    ].join("\n");
+  }
+
+  const argSection = paramNames.length ? `, ${paramNames.join(", ")}` : "";
   return [
     "class Solution:",
     `    def ${problem.entryName}(self${argSection}):`,
@@ -150,10 +202,10 @@ const buildLeetCodeStarter = (problem) => {
   ].join("\n");
 };
 
-const buildExamples = (problem) => {
+const buildExamples = (problem, language = "python") => {
   if (!problem) return [];
 
-  const paramsFromStarter = parseParamsFromStarter(problem.starter || "", problem.entryName);
+  const paramsFromStarter = parseParamsFromStarter(problem.starter || "", problem.entryName, language);
   const paramNames = paramsFromStarter.length
     ? paramsFromStarter
     : inferParamsFromTests(problem.testCases || []);
@@ -190,7 +242,9 @@ const buildExamples = (problem) => {
 export default function ProblemSolver() {
   const { topicId, problemId } = useParams();
   const [searchParams] = useSearchParams();
+  const [learningLanguage] = useLearningLanguage();
   const challengeId = searchParams.get("challengeId");
+  const queryLanguage = normalizeLanguage(searchParams.get("language") || learningLanguage);
 
   const [problem, setProblem] = useState(null);
   const [tree, setTree] = useState([]);
@@ -203,6 +257,7 @@ export default function ProblemSolver() {
   const [fileError, setFileError] = useState("");
   const [modal, setModal] = useState({ open: false, type: "", target: null, parentId: null });
   const [nameInput, setNameInput] = useState("");
+  const editorRef = useRef(null);
 
   const {
     output,
@@ -215,27 +270,32 @@ export default function ProblemSolver() {
     clearOutput,
   } = useInteractiveRun();
 
+  const problemLanguage = normalizeLanguage(problem?.language || queryLanguage);
+  const languageConfig = getLanguageConfig(problemLanguage);
   const activeFile = useMemo(() => findNode(tree, activeFileId), [tree, activeFileId]);
-  const leetStarter = useMemo(() => buildLeetCodeStarter(problem), [problem]);
-  const examples = useMemo(() => buildExamples(problem), [problem]);
+  const leetStarter = useMemo(
+    () => buildLeetCodeStarter(problem, problemLanguage),
+    [problem, problemLanguage]
+  );
+  const examples = useMemo(() => buildExamples(problem, problemLanguage), [problem, problemLanguage]);
   const hasReferenceSolution =
     typeof problem?.solution === "string" && problem.solution.trim().length > 0;
 
   useEffect(() => {
     const load = async () => {
       try {
-        const data = await apiRequest(`/api/problems/${problemId}`);
+        const data = await apiRequest(withLanguageQuery(`/api/problems/${problemId}`, queryLanguage));
         setProblem(data);
       } catch (err) {
         setFileError(err.message || "Unable to load problem");
       }
     };
     load();
-  }, [problemId]);
+  }, [problemId, queryLanguage]);
 
   useEffect(() => {
     if (!problem) return;
-    const initialTree = createInitialTree(leetStarter);
+    const initialTree = createInitialTree(leetStarter, problemLanguage);
     const mainFile = initialTree[0];
     setTree(initialTree);
     setTabs([{ id: mainFile.id, name: mainFile.name }]);
@@ -243,11 +303,12 @@ export default function ProblemSolver() {
     setEditorValue(mainFile.content || "");
     setFileError("");
     clearOutput();
-  }, [problem?.id, leetStarter, clearOutput]);
+  }, [problem?._id, leetStarter, problemLanguage, clearOutput]);
 
   useEffect(() => {
     if (activeFile?.type === "file") {
       setEditorValue(activeFile.content || "");
+      window.setTimeout(() => editorRef.current?.focus(), 0);
       return;
     }
     setEditorValue("");
@@ -262,7 +323,7 @@ export default function ProblemSolver() {
     setFileError("");
     try {
       const code = (editorValue ?? "").length ? editorValue : activeFile.content || "";
-      await startRun({ code });
+      await startRun({ code, language: problemLanguage });
     } catch (err) {
       setFileError(err.message || "Unable to run code");
     }
@@ -276,7 +337,7 @@ export default function ProblemSolver() {
 
     setFileError("");
     const content = (editorValue ?? "").length ? editorValue : activeFile.content || "";
-    downloadPyFile(activeFile.name || "main.py", content, "main.py");
+    downloadCodeFile(activeFile.name || `main.${languageConfig.fileExtension}`, content, problemLanguage);
   };
 
   const submitCode = async () => {
@@ -294,7 +355,7 @@ export default function ProblemSolver() {
     try {
       const res = await apiRequest("/api/judge", {
         method: "POST",
-        body: JSON.stringify({ problemId, code, challengeId }),
+        body: JSON.stringify({ problemId, code, challengeId, language: problemLanguage }),
       });
       setResult(res);
       if (res.challengeMessage) {
@@ -310,9 +371,9 @@ export default function ProblemSolver() {
   const handleSelectFile = (node) => {
     if (node.type !== "file") return;
     setActiveFileId(node.id);
-    if (!tabs.find((tab) => tab.id === node.id)) {
-      setTabs((prev) => [...prev, { id: node.id, name: node.name }]);
-    }
+    setTabs((prev) =>
+      prev.some((tab) => tab.id === node.id) ? prev : [...prev, { id: node.id, name: node.name }]
+    );
   };
 
   const handleEditorChange = (value) => {
@@ -323,8 +384,10 @@ export default function ProblemSolver() {
   };
 
   const openModal = (type, target = null, parentId = null) => {
+    const defaultName =
+      type === "new-file" ? `untitled.${languageConfig.fileExtension}` : target?.name || "";
     setModal({ open: true, type, target, parentId });
-    setNameInput(target?.name || "");
+    setNameInput(defaultName);
   };
 
   const closeModal = () => {
@@ -336,7 +399,7 @@ export default function ProblemSolver() {
     const name = nameInput.trim();
     if (!name) return;
     if (/[/\\]/.test(name)) {
-      setFileError("File and folder names cannot include / or \\\\.");
+      setFileError("File and folder names cannot include / or \\");
       return;
     }
 
@@ -347,11 +410,14 @@ export default function ProblemSolver() {
       setTree((prev) => addNode(prev, modal.parentId, newNode));
       if (newNode.type === "file") {
         setActiveFileId(newNode.id);
-        if (!tabs.find((tab) => tab.id === newNode.id)) {
-          setTabs((prev) => [...prev, { id: newNode.id, name: newNode.name }]);
-        }
+        setTabs((prev) =>
+          prev.some((tab) => tab.id === newNode.id)
+            ? prev
+            : [...prev, { id: newNode.id, name: newNode.name }]
+        );
       }
       closeModal();
+      window.setTimeout(() => editorRef.current?.focus(), 0);
       return;
     }
 
@@ -402,7 +468,7 @@ export default function ProblemSolver() {
 
   const resetWorkspace = () => {
     if (!problem) return;
-    const initialTree = createInitialTree(leetStarter);
+    const initialTree = createInitialTree(leetStarter, problemLanguage);
     const mainFile = initialTree[0];
     setTree(initialTree);
     setTabs([{ id: mainFile.id, name: mainFile.name }]);
@@ -410,15 +476,14 @@ export default function ProblemSolver() {
     setEditorValue(mainFile.content || "");
     clearOutput();
     setFileError("");
+    window.setTimeout(() => editorRef.current?.focus(), 0);
   };
 
   if (!problem) {
     return (
       <div className="min-h-screen bg-slate-950 text-white">
         <Navbar />
-        <div className="mx-auto max-w-6xl px-6 py-10 text-sm text-slate-400">
-          Loading problem...
-        </div>
+        <div className="mx-auto max-w-6xl px-6 py-10 text-sm text-slate-400">Loading problem...</div>
       </div>
     );
   }
@@ -429,7 +494,7 @@ export default function ProblemSolver() {
       <div className="border-y border-slate-800 bg-slate-950/70 backdrop-blur">
         <div className="mx-auto max-w-[1700px] px-4 py-3">
           <div className="flex items-center justify-between text-xs text-slate-400">
-            <div className="uppercase tracking-[0.2em]">Practice Workspace</div>
+            <div className="uppercase tracking-[0.2em]">{languageConfig.label} Practice Workspace</div>
             <div>{challengeId ? "Challenge Mode Enabled" : "Standard Practice Mode"}</div>
           </div>
         </div>
@@ -439,34 +504,40 @@ export default function ProblemSolver() {
         <div className="rounded-2xl border border-slate-800 bg-slate-950/80 p-6 shadow-[0_20px_80px_rgba(0,0,0,0.35)]">
           <div className="flex items-center justify-between">
             <div>
-              <div className="text-xs uppercase tracking-widest text-emerald-300">
-                {problem.difficulty}
-              </div>
+              <div className="text-xs uppercase tracking-widest text-emerald-300">{problem.difficulty}</div>
               <div className="mt-2 text-4xl font-semibold leading-tight">{problem.title}</div>
             </div>
-            <Link to={`/practice/${topicId}`} className="text-sm text-slate-400 hover:text-white">
+            <Link
+              to={`/practice/${topicId}?language=${encodeURIComponent(problemLanguage)}`}
+              className="text-sm text-slate-400 transition hover:text-white"
+            >
               Back to list
             </Link>
           </div>
+
           <div className="mt-6 rounded-xl border border-slate-800 bg-slate-900/40 px-4 py-4">
             <div className="text-xs uppercase tracking-widest text-slate-500">Problem Statement</div>
             <p className="mt-3 text-lg leading-8 text-slate-200">{problem.prompt}</p>
             <div className="mt-4 text-xs text-slate-500">
-              Expected Complexity: {problem.complexity}
+              Expected Complexity: {problem.complexity} | Language: {languageConfig.label}
             </div>
           </div>
+
           {problem.entryType === "function" && (
             <div className="mt-4 rounded-xl border border-slate-800 bg-slate-900/40 px-4 py-4">
               <div className="text-xs uppercase tracking-widest text-slate-500">
                 Function Signature (LeetCode Style)
               </div>
               <pre className="mt-3 whitespace-pre-wrap rounded-md bg-slate-950 p-3 text-xs text-emerald-200">
-{`class Solution:
-    def ${problem.entryName}(self, ...):
-        ...`}
+                {problemLanguage === "javascript"
+                  ? `class Solution {\n  ${problem.entryName}(...args) {\n    ...\n  }\n}`
+                  : problemLanguage === "c"
+                    ? `int ${problem.entryName}(/* args */) {\n  ...\n}`
+                    : `class Solution:\n    def ${problem.entryName}(self, ...):\n        ...`}
               </pre>
             </div>
           )}
+
           {examples.length > 0 && (
             <div className="mt-4 rounded-xl border border-slate-800 bg-slate-900/40 px-4 py-4">
               <div className="text-xs uppercase tracking-widest text-slate-500">Examples</div>
@@ -481,6 +552,7 @@ export default function ProblemSolver() {
               </div>
             </div>
           )}
+
           {challengeId && (
             <div className="mt-3 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-200">
               Challenge mode enabled. Submission counts only when all tests pass.
@@ -491,14 +563,14 @@ export default function ProblemSolver() {
             {hasReferenceSolution && (
               <button
                 onClick={() => setShowSolution((prev) => !prev)}
-                className="rounded-md border border-slate-700 px-3 py-2 text-xs text-slate-200 hover:border-slate-600"
+                className="rounded-md border border-slate-700 px-3 py-2 text-xs text-slate-200 transition hover:border-slate-600"
               >
                 {showSolution ? "Hide Solution" : "Show Solution"}
               </button>
             )}
             <button
               onClick={resetWorkspace}
-              className="rounded-md border border-slate-700 px-3 py-2 text-xs text-slate-200 hover:border-slate-600"
+              className="rounded-md border border-slate-700 px-3 py-2 text-xs text-slate-200 transition hover:border-slate-600"
             >
               Reset Workspace
             </button>
@@ -583,21 +655,21 @@ export default function ProblemSolver() {
                 <button
                   onClick={runCode}
                   disabled={!activeFileId || isRunning}
-                  className="rounded-md border border-slate-700 px-3 py-2 text-xs text-slate-200 hover:border-slate-600 disabled:opacity-50"
+                  className="rounded-md border border-slate-700 px-3 py-2 text-xs text-slate-200 transition hover:border-slate-600 disabled:opacity-50"
                 >
                   {isRunning ? "Running..." : "Run"}
                 </button>
                 <button
                   onClick={downloadActiveFile}
                   disabled={!activeFileId}
-                  className="rounded-md border border-slate-700 px-3 py-2 text-xs text-slate-200 hover:border-slate-600 disabled:opacity-50"
+                  className="rounded-md border border-slate-700 px-3 py-2 text-xs text-slate-200 transition hover:border-slate-600 disabled:opacity-50"
                 >
-                  Download .py
+                  Download {languageConfig.downloadExt}
                 </button>
                 <button
                   onClick={submitCode}
                   disabled={loading}
-                  className="rounded-md bg-emerald-500 px-3 py-2 text-xs font-semibold text-slate-950 hover:bg-emerald-400 disabled:opacity-50"
+                  className="rounded-md bg-emerald-500 px-3 py-2 text-xs font-semibold text-slate-950 transition hover:bg-emerald-400 hover:shadow-[0_0_0_2px_rgba(16,185,129,0.35)] disabled:opacity-50"
                 >
                   {loading ? "Submitting..." : "Submit"}
                 </button>
@@ -620,10 +692,14 @@ export default function ProblemSolver() {
             <div className="flex-1 bg-slate-950">
               <Editor
                 height="100%"
-                language="python"
+                language={languageConfig.monaco}
                 theme="vscode-dark-plus"
                 value={editorValue}
                 onChange={handleEditorChange}
+                onMount={(editor) => {
+                  editorRef.current = editor;
+                  editor.focus();
+                }}
                 beforeMount={applyVscodeTheme}
                 options={editorOptions}
               />
@@ -639,7 +715,9 @@ export default function ProblemSolver() {
               onClear={clearOutput}
             />
             <div className="flex items-center justify-between border-t border-slate-800 bg-slate-900 px-4 py-2 text-xs text-slate-400">
-              <div>{activeFile?.name || "No file"} | Python</div>
+              <div>
+                {activeFile?.name || "No file"} | {languageConfig.label}
+              </div>
               <div>UTF-8 | LF | VSCode-style practice workspace</div>
             </div>
           </div>
@@ -656,7 +734,7 @@ export default function ProblemSolver() {
         onConfirm={confirmModal}
       >
         <input
-          className="w-full rounded-md border border-slate-800 bg-slate-900 px-3 py-2 text-sm text-white placeholder:text-slate-600"
+          className="w-full rounded-md border border-slate-800 bg-slate-900 px-3 py-2 text-sm text-white placeholder:text-slate-600 outline-none transition focus:border-emerald-400"
           placeholder="Name"
           value={nameInput}
           onChange={(e) => setNameInput(e.target.value)}

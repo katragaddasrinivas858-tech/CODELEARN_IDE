@@ -3,28 +3,32 @@ import { Link } from "react-router-dom";
 import Navbar from "../components/Navbar";
 import { isTeacher } from "../lib/auth";
 import { apiRequest } from "../lib/api";
+import { getLanguageConfig, withLanguageQuery } from "../lib/languages";
+import useLearningLanguage from "../hooks/useLearningLanguage";
 
 export default function Topics() {
+  const [learningLanguage] = useLearningLanguage();
   const [topics, setTopics] = useState([]);
   const [error, setError] = useState("");
+  const languageConfig = getLanguageConfig(learningLanguage);
 
   useEffect(() => {
     const load = async () => {
       try {
-        const data = await apiRequest("/api/topics");
+        const data = await apiRequest(withLanguageQuery("/api/topics", learningLanguage));
         setTopics(data);
       } catch (err) {
         setError(err.message);
       }
     };
     load();
-  }, []);
+  }, [learningLanguage]);
 
   const seed = async () => {
     setError("");
     try {
-      await apiRequest("/api/seed/python", { method: "POST" });
-      const data = await apiRequest("/api/topics");
+      await apiRequest(`/api/seed/${learningLanguage}`, { method: "POST" });
+      const data = await apiRequest(withLanguageQuery("/api/topics", learningLanguage));
       setTopics(data);
     } catch (err) {
       setError(err.message);
@@ -37,17 +41,17 @@ export default function Topics() {
       <div className="mx-auto max-w-6xl px-6 py-10">
         <div className="flex items-center justify-between">
           <div>
-            <div className="text-2xl font-semibold">Python Learning Paths</div>
+            <div className="text-2xl font-semibold">{languageConfig.label} Learning Paths</div>
             <div className="text-sm text-slate-400">
-              Follow the structured topics from basics to advanced.
+              Follow structured {languageConfig.label} topics from basics to advanced.
             </div>
           </div>
           {isTeacher() && (
             <button
               onClick={seed}
-              className="rounded-md border border-slate-800 px-3 py-2 text-xs text-slate-200 hover:border-slate-700"
+              className="rounded-md border border-slate-700 px-3 py-2 text-xs text-slate-200 transition hover:border-emerald-400 hover:text-white"
             >
-              Seed Topics & Problems
+              Seed {languageConfig.label} Topics
             </button>
           )}
         </div>
@@ -68,8 +72,8 @@ export default function Topics() {
                 {topic.lessons?.length || 0} lessons
               </div>
               <Link
-                to={`/topics/${topic._id}`}
-                className="mt-5 inline-flex rounded-md bg-emerald-500 px-4 py-2 text-xs font-semibold text-slate-950 hover:bg-emerald-400"
+                to={`/topics/${topic._id}?language=${encodeURIComponent(learningLanguage)}`}
+                className="mt-5 inline-flex rounded-md bg-emerald-500 px-4 py-2 text-xs font-semibold text-slate-950 transition hover:bg-emerald-400 hover:shadow-[0_0_0_2px_rgba(16,185,129,0.35)]"
               >
                 Explore Topic
               </Link>
@@ -77,7 +81,7 @@ export default function Topics() {
           ))}
           {topics.length === 0 && (
             <div className="rounded-xl border border-dashed border-slate-800 bg-slate-900/50 p-6 text-sm text-slate-400">
-              No topics yet. Ask a teacher to seed the curriculum.
+              No {languageConfig.label} topics yet. Ask a teacher to seed this curriculum.
             </div>
           )}
         </div>

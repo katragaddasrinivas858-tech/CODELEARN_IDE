@@ -13,6 +13,7 @@ const LessonSchema = new mongoose.Schema(
 
 const TopicSchema = new mongoose.Schema(
   {
+    language: { type: String, enum: ["python", "javascript", "c"], default: "python", index: true },
     title: { type: String, required: true },
     slug: { type: String, required: true, unique: true },
     description: { type: String, default: "" },

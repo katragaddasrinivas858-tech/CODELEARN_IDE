@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useParams, useSearchParams } from "react-router-dom";
 import Navbar from "../components/Navbar";
 import { apiRequest } from "../lib/api";
 import LessonRichRenderer from "../components/LessonRichRenderer";
+import useLearningLanguage from "../hooks/useLearningLanguage";
+import { getLanguageConfig, normalizeLanguage, withLanguageQuery } from "../lib/languages";
 
 const UPCOMING_COURSES = [
   { title: "System Design Training", startsAt: "Starting from Feb 14, 2026", rating: 4.6 },
@@ -91,18 +93,22 @@ const renderLessonContent = (content) => {
 
 export default function TopicDetail() {
   const { id } = useParams();
+  const [searchParams] = useSearchParams();
+  const [learningLanguage] = useLearningLanguage();
+  const activeLanguage = normalizeLanguage(searchParams.get("language") || learningLanguage);
   const [topic, setTopic] = useState(null);
   const [allTopics, setAllTopics] = useState([]);
   const [activeLessonId, setActiveLessonId] = useState("");
   const [error, setError] = useState("");
+  const languageConfig = getLanguageConfig(activeLanguage);
 
   useEffect(() => {
     const load = async () => {
       setError("");
       try {
         const [topicData, topicsData] = await Promise.all([
-          apiRequest(`/api/topics/${id}`),
-          apiRequest("/api/topics"),
+          apiRequest(withLanguageQuery(`/api/topics/${id}`, activeLanguage)),
+          apiRequest(withLanguageQuery("/api/topics", activeLanguage)),
         ]);
         setTopic(topicData);
         setAllTopics(topicsData || []);
@@ -111,7 +117,7 @@ export default function TopicDetail() {
       }
     };
     load();
-  }, [id]);
+  }, [id, activeLanguage]);
 
   const orderedLessons = useMemo(() => {
     if (!topic?.lessons?.length) return [];
@@ -151,7 +157,7 @@ export default function TopicDetail() {
             {allTopics.map((topicNav) => (
               <Link
                 key={topicNav._id}
-                to={`/topics/${topicNav._id}`}
+                to={`/topics/${topicNav._id}?language=${encodeURIComponent(activeLanguage)}`}
                 className={`whitespace-nowrap rounded-md px-3 py-2 text-sm transition ${
                   topicNav._id === topic._id
                     ? "bg-emerald-500/20 text-emerald-200 ring-1 ring-emerald-400/30"
@@ -196,10 +202,10 @@ export default function TopicDetail() {
 
             <div className="border-t border-slate-800 px-3 py-3">
               <Link
-                to={`/practice/${topic._id}`}
+                to={`/practice/${topic._id}?language=${encodeURIComponent(activeLanguage)}`}
                 className="inline-flex w-full items-center justify-center rounded-md bg-emerald-500 px-4 py-2 text-sm font-semibold text-slate-950 hover:bg-emerald-400"
               >
-                Topic Questions
+                {languageConfig.label} Questions
               </Link>
             </div>
           </aside>
@@ -265,10 +271,10 @@ export default function TopicDetail() {
 
         <div className="mt-6 lg:hidden">
           <Link
-            to={`/practice/${topic._id}`}
+            to={`/practice/${topic._id}?language=${encodeURIComponent(activeLanguage)}`}
             className="inline-flex items-center rounded-md bg-emerald-500 px-5 py-3 text-sm font-semibold text-slate-950 hover:bg-emerald-400"
           >
-            Solve Topic Questions
+            Solve {languageConfig.label} Questions
           </Link>
         </div>
       </div>

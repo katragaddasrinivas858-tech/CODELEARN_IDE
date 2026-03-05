@@ -1,23 +1,37 @@
 const crypto = require("crypto");
 const Project = require("../models/Project");
+const User = require("../models/User");
+const { SUPPORTED_LANGUAGES, normalizeLanguage } = require("../constants/languages");
 
-const defaultFiles = () => [
+const defaultFiles = (language) => [
   {
     id: crypto.randomUUID(),
-    name: "main.py",
+    name:
+      language === SUPPORTED_LANGUAGES.JAVASCRIPT
+        ? "main.js"
+        : language === SUPPORTED_LANGUAGES.C
+          ? "main.c"
+          : "main.py",
     type: "file",
-    content: 'print("Hello from CodeLearn")',
+    content:
+      language === SUPPORTED_LANGUAGES.JAVASCRIPT
+        ? 'console.log("Hello from CodeLearn");'
+        : language === SUPPORTED_LANGUAGES.C
+          ? '#include <stdio.h>\n\nint main(void) {\n  printf("Hello from CodeLearn\\n");\n  return 0;\n}\n'
+        : 'print("Hello from CodeLearn")',
   },
 ];
 
 const createProject = async (req, res) => {
-  const { name, files } = req.body;
+  const { name, files, language } = req.body;
   if (!name) return res.status(400).json({ error: "Project name required" });
+  const user = await User.findById(req.user.id).select("learningLanguage");
+  const preferredLanguage = normalizeLanguage(language || user?.learningLanguage);
 
   const project = await Project.create({
     userId: req.user.id,
     projectName: name,
-    files: Array.isArray(files) && files.length ? files : defaultFiles(),
+    files: Array.isArray(files) && files.length ? files : defaultFiles(preferredLanguage),
     lastOpened: new Date(),
   });
 

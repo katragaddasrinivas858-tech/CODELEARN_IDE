@@ -2,6 +2,8 @@ import { useEffect, useMemo, useState } from "react";
 import Navbar from "../components/Navbar";
 import RichLessonEditor from "../components/RichLessonEditor";
 import { apiRequest } from "../lib/api";
+import useLearningLanguage from "../hooks/useLearningLanguage";
+import { getLanguageConfig, SUPPORTED_LANGUAGES, withLanguageQuery } from "../lib/languages";
 import {
   blocksFromPlainText,
   lessonBlocksToPlainText,
@@ -9,6 +11,7 @@ import {
 } from "../lib/lessonBlocks";
 
 export default function TeacherAdmin() {
+  const [learningLanguage, setLearningLanguage] = useLearningLanguage();
   const [students, setStudents] = useState([]);
   const [topics, setTopics] = useState([]);
   const [selectedTopicId, setSelectedTopicId] = useState("");
@@ -24,6 +27,7 @@ export default function TeacherAdmin() {
   const [savingTopic, setSavingTopic] = useState(false);
   const [savingLesson, setSavingLesson] = useState(false);
   const [resettingCurriculum, setResettingCurriculum] = useState(false);
+  const languageConfig = getLanguageConfig(learningLanguage);
 
   const orderedTopics = useMemo(
     () => [...topics].sort((a, b) => (a.order || 0) - (b.order || 0)),
@@ -67,7 +71,7 @@ export default function TeacherAdmin() {
   };
 
   const refreshTopics = async (preferredTopicId = selectedTopicId, preferredLessonId = selectedLessonId) => {
-    const data = await apiRequest("/api/topics?full=true");
+    const data = await apiRequest(withLanguageQuery("/api/topics?full=true", learningLanguage));
     const sorted = [...(data || [])].sort((a, b) => (a.order || 0) - (b.order || 0));
     setTopics(sorted);
     syncTopicSelection(sorted, preferredTopicId, preferredLessonId);
@@ -78,8 +82,8 @@ export default function TeacherAdmin() {
       setTopicsLoading(true);
       try {
         const [studentsData, topicsData] = await Promise.all([
-          apiRequest("/api/teacher/students"),
-          apiRequest("/api/topics?full=true"),
+          apiRequest(withLanguageQuery("/api/teacher/students", learningLanguage)),
+          apiRequest(withLanguageQuery("/api/topics?full=true", learningLanguage)),
         ]);
         setStudents(studentsData.students || []);
         const sorted = [...(topicsData || [])].sort((a, b) => (a.order || 0) - (b.order || 0));
@@ -92,7 +96,7 @@ export default function TeacherAdmin() {
       }
     };
     load();
-  }, []);
+  }, [learningLanguage]);
 
   useEffect(() => {
     if (!selectedTopic) {
@@ -138,7 +142,7 @@ export default function TeacherAdmin() {
     setError("");
     setAdminMessage("");
     try {
-      const res = await apiRequest("/api/seed/python", { method: "POST" });
+      const res = await apiRequest(`/api/seed/${learningLanguage}`, { method: "POST" });
       setAdminMessage(res.message || "Curriculum seeded.");
       await refreshTopics();
     } catch (err) {
@@ -150,7 +154,10 @@ export default function TeacherAdmin() {
     setError("");
     setAdminMessage("");
     try {
-      const res = await apiRequest("/api/seed/challenges", { method: "POST" });
+      const res = await apiRequest(
+        withLanguageQuery("/api/seed/challenges", learningLanguage),
+        { method: "POST" }
+      );
       setAdminMessage(
         res.count
           ? `Created ${res.count} challenges.`
@@ -174,7 +181,7 @@ export default function TeacherAdmin() {
     try {
       const res = await apiRequest("/api/seed/topic-content", {
         method: "POST",
-        body: JSON.stringify({ replaceExisting: true }),
+        body: JSON.stringify({ replaceExisting: true, language: learningLanguage }),
       });
       setAdminMessage(
         `Imported web content into ${res.updatedLessons || 0} lessons across ${
@@ -250,7 +257,7 @@ export default function TeacherAdmin() {
     setAdminMessage("");
     setResettingCurriculum(true);
     try {
-      const res = await apiRequest("/api/seed/python", {
+      const res = await apiRequest(`/api/seed/${learningLanguage}`, {
         method: "DELETE",
         body: JSON.stringify({ confirm: "RESET_CURRICULUM" }),
       });
@@ -275,33 +282,44 @@ export default function TeacherAdmin() {
           <div>
             <div className="text-2xl font-semibold">Teacher Admin</div>
             <div className="text-sm text-slate-400">
-              Track student progress, seed rich lesson content, and launch ranked challenges.
+              Track {languageConfig.label} student progress, seed rich lesson content, and launch ranked challenges.
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2">
+            <select
+              value={learningLanguage}
+              onChange={(event) => setLearningLanguage(event.target.value)}
+              className="rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-xs text-slate-200 outline-none transition hover:border-slate-500 focus:border-emerald-400"
+            >
+              {SUPPORTED_LANGUAGES.map((language) => (
+                <option key={language.id} value={language.id}>
+                  {language.label}
+                </option>
+              ))}
+            </select>
             <button
               onClick={seedCurriculum}
-              className="rounded-md border border-slate-700 px-3 py-2 text-xs text-slate-200 hover:border-slate-500"
+              className="rounded-md border border-slate-700 px-3 py-2 text-xs text-slate-200 transition hover:border-slate-500 hover:text-white"
             >
-              Seed Topics & Problems
+              Seed {languageConfig.label} Topics
             </button>
             <button
               onClick={importTopicContent}
               disabled={importingContent}
-              className="rounded-md border border-emerald-500/50 px-3 py-2 text-xs text-emerald-200 hover:border-emerald-400 disabled:opacity-50"
+              className="rounded-md border border-emerald-500/50 px-3 py-2 text-xs text-emerald-200 transition hover:border-emerald-400 disabled:opacity-50"
             >
               {importingContent ? "Importing..." : "Import Web Lesson Content"}
             </button>
             <button
               onClick={seedChallenges}
-              className="rounded-md bg-emerald-500 px-3 py-2 text-xs font-semibold text-slate-950 hover:bg-emerald-400"
+              className="rounded-md bg-emerald-500 px-3 py-2 text-xs font-semibold text-slate-950 transition hover:bg-emerald-400 hover:shadow-[0_0_0_2px_rgba(16,185,129,0.35)]"
             >
-              Create 20 Challenges
+              Create {languageConfig.label} Challenges
             </button>
             <button
               onClick={resetCurriculum}
               disabled={resettingCurriculum}
-              className="rounded-md border border-rose-500/50 px-3 py-2 text-xs text-rose-200 hover:border-rose-400 disabled:opacity-50"
+              className="rounded-md border border-rose-500/50 px-3 py-2 text-xs text-rose-200 transition hover:border-rose-400 disabled:opacity-50"
             >
               {resettingCurriculum ? "Removing..." : "Remove Seeded Curriculum"}
             </button>
@@ -340,7 +358,7 @@ export default function TeacherAdmin() {
                 {students.length === 0 && (
                   <tr>
                     <td colSpan="4" className="px-4 py-6 text-center text-slate-400">
-                      No students yet.
+                      No {languageConfig.label} students yet.
                     </td>
                   </tr>
                 )}
@@ -351,7 +369,7 @@ export default function TeacherAdmin() {
           <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-4">
             <div className="text-sm font-semibold text-emerald-200">Rich Topic Content Editor</div>
             <div className="mt-1 text-xs text-slate-400">
-              Build lesson pages with headings, images, and runnable Python code snippets.
+              Build {languageConfig.label} lesson pages with headings, images, and runnable code snippets.
             </div>
 
             <div className="mt-4 grid gap-4 lg:grid-cols-2">

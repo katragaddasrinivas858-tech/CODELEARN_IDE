@@ -1,10 +1,16 @@
-﻿import { useEffect, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { useEffect, useState } from "react";
+import { Link, useParams, useSearchParams } from "react-router-dom";
 import Navbar from "../components/Navbar";
 import { apiRequest } from "../lib/api";
+import useLearningLanguage from "../hooks/useLearningLanguage";
+import { normalizeLanguage, withLanguageQuery } from "../lib/languages";
 
 export default function ChallengeDetail() {
   const { id } = useParams();
+  const [searchParams] = useSearchParams();
+  const [learningLanguage] = useLearningLanguage();
+  const activeLanguage = normalizeLanguage(searchParams.get("language") || learningLanguage);
+
   const [challenge, setChallenge] = useState(null);
   const [problems, setProblems] = useState([]);
   const [leaderboard, setLeaderboard] = useState([]);
@@ -14,15 +20,19 @@ export default function ChallengeDetail() {
   useEffect(() => {
     const load = async () => {
       try {
-        const data = await apiRequest(`/api/challenges/${id}`);
+        const data = await apiRequest(withLanguageQuery(`/api/challenges/${id}`, activeLanguage));
         setChallenge(data);
 
         const problemList = await Promise.all(
-          (data.problemIds || []).map((problemId) => apiRequest(`/api/problems/${problemId}`))
+          (data.problemIds || []).map((problemId) =>
+            apiRequest(withLanguageQuery(`/api/problems/${problemId}`, activeLanguage))
+          )
         );
         setProblems(problemList);
 
-        const board = await apiRequest(`/api/challenges/${id}/leaderboard`);
+        const board = await apiRequest(
+          withLanguageQuery(`/api/challenges/${id}/leaderboard`, activeLanguage)
+        );
         setLeaderboard(board.leaderboard || []);
         setRankingRule(board.rankingRule || "");
       } catch (err) {
@@ -30,7 +40,7 @@ export default function ChallengeDetail() {
       }
     };
     load();
-  }, [id]);
+  }, [id, activeLanguage]);
 
   if (!challenge) {
     return (
@@ -59,8 +69,10 @@ export default function ChallengeDetail() {
                 {problem.difficulty} | {problem.complexity}
               </div>
               <Link
-                to={`/practice/${problem.topicId}/${problem._id}?challengeId=${challenge._id}`}
-                className="mt-3 inline-flex rounded-md bg-emerald-500 px-3 py-2 text-xs font-semibold text-slate-950 hover:bg-emerald-400"
+                to={`/practice/${problem.topicId}/${problem._id}?challengeId=${challenge._id}&language=${encodeURIComponent(
+                  activeLanguage
+                )}`}
+                className="mt-3 inline-flex rounded-md bg-emerald-500 px-3 py-2 text-xs font-semibold text-slate-950 transition hover:bg-emerald-400 hover:shadow-[0_0_0_2px_rgba(16,185,129,0.35)]"
               >
                 Solve
               </Link>

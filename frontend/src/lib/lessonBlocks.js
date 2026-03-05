@@ -1,3 +1,5 @@
+import { normalizeLanguage } from "./languages";
+
 const LESSON_BLOCK_TYPES = Object.freeze({
   HEADING: "heading",
   PARAGRAPH: "paragraph",
@@ -6,6 +8,7 @@ const LESSON_BLOCK_TYPES = Object.freeze({
 });
 
 const MAX_BLOCKS = 120;
+const SUPPORTED_CODE_LANGUAGES = new Set(["python", "javascript", "c"]);
 
 export const createBlockId = () => {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
@@ -101,10 +104,11 @@ export const normalizeLessonBlocks = (rawBlocks) => {
     }
 
     if (type === LESSON_BLOCK_TYPES.CODE) {
+      const language = normalizeLanguage(raw.language || "python");
       sanitized.push({
         id,
         type,
-        language: "python",
+        language: SUPPORTED_CODE_LANGUAGES.has(language) ? language : "python",
         title: normalizeSingleLine(raw.title, 160),
         code: normalizeMultiline(raw.code, 50000),
         stdin: normalizeMultiline(raw.stdin, 4000),

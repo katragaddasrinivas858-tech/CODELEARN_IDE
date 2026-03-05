@@ -1,5 +1,6 @@
 const Submission = require("../models/Submission");
 const User = require("../models/User");
+const { buildLanguageFilter, normalizeLanguage } = require("../constants/languages");
 
 const getLeaderboard = async (req, res) => {
   const user = await User.findById(req.user.id);
@@ -7,9 +8,10 @@ const getLeaderboard = async (req, res) => {
 
   const teacherId = user.role === "teacher" ? user._id : user.teacherId;
   if (!teacherId) return res.status(400).json({ error: "Teacher not assigned" });
+  const selectedLanguage = normalizeLanguage(req.query.language || user.learningLanguage);
 
   const stats = await Submission.aggregate([
-    { $match: { teacherId, status: "Accepted" } },
+    { $match: { teacherId, status: "Accepted", ...buildLanguageFilter(selectedLanguage) } },
     {
       $group: {
         _id: "$userId",
@@ -48,7 +50,7 @@ const getLeaderboard = async (req, res) => {
     };
   });
 
-  return res.json({ teacherId, leaderboard });
+  return res.json({ teacherId, language: selectedLanguage, leaderboard });
 };
 
 module.exports = { getLeaderboard };

@@ -118,7 +118,7 @@ export default function useInteractiveRun() {
   }, []);
 
   const startRun = useCallback(
-    async ({ code, projectId, fileId, files, entryFile, initialInput = "" }) => {
+    async ({ code, projectId, fileId, files, entryFile, language, initialInput = "" }) => {
       await stopRun();
       setOutput("");
       setRunMessage("");
@@ -139,6 +139,7 @@ export default function useInteractiveRun() {
             fileId,
             files,
             entryFile,
+            language,
             input: initialInput,
           }),
         });

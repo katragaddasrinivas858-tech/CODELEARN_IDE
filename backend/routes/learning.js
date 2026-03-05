@@ -8,7 +8,7 @@ const {
   listChallenges,
   getChallenge,
   getChallengeLeaderboard,
-  seedPython,
+  seedCurriculum,
   seedChallenges,
   seedTopicContentFromWeb,
   updateTopicContent,
@@ -28,9 +28,9 @@ router.get("/challenges", listChallenges);
 router.get("/challenges/:id", getChallenge);
 router.get("/challenges/:id/leaderboard", auth, getChallengeLeaderboard);
 
-router.post("/seed/python", auth, seedPython);
-router.delete("/seed/python", auth, resetSeededCurriculum);
 router.post("/seed/challenges", auth, seedChallenges);
 router.post("/seed/topic-content", auth, seedTopicContentFromWeb);
+router.post("/seed/:language", auth, seedCurriculum);
+router.delete("/seed/:language", auth, resetSeededCurriculum);
 
 module.exports = router;

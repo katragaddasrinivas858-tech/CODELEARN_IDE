@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Editor from "@monaco-editor/react";
 import Navbar from "../components/Navbar";
 import ActivityBar from "../components/ActivityBar";
@@ -8,8 +8,10 @@ import Modal from "../components/Modal";
 import ConsolePanel from "../components/ConsolePanel";
 import { findNode, flattenFiles } from "../lib/tree";
 import { applyVscodeTheme, editorOptions } from "../lib/monaco";
-import { downloadPyFile, isLikelyPythonPath, toWorkspacePyDownloadName } from "../lib/download";
+import { downloadCodeFile, isLikelySourcePath, toWorkspaceDownloadName } from "../lib/download";
 import useInteractiveRun from "../hooks/useInteractiveRun";
+import useLearningLanguage from "../hooks/useLearningLanguage";
+import { getLanguageConfig } from "../lib/languages";
 
 const STORAGE_KEY = "practice-studio-workspace-v1";
 
@@ -34,21 +36,42 @@ const createFolder = (name) => ({
   children: [],
 });
 
-const createInitialTree = () => [
-  createFile(
-    "main.py",
-    [
-      "# Practice mode workspace",
-      "# Write and run code freely. Nothing is submitted.",
-      "",
-      "print(\"Start practicing\")",
-      "",
-    ].join("\n")
-  ),
-];
+const createInitialTree = (language = "python") => {
+  const config = getLanguageConfig(language);
+  const defaultSource =
+    config.id === "javascript"
+      ? [
+          "// Practice mode workspace",
+          "// Write and run code freely. Nothing is submitted.",
+          "",
+          "console.log(\"Start practicing\");",
+          "",
+        ].join("\n")
+      : config.id === "c"
+        ? [
+            "#include <stdio.h>",
+            "",
+            "int main(void) {",
+            "  // Practice mode workspace",
+            "  // Write and run code freely. Nothing is submitted.",
+            "  printf(\"Start practicing\\n\");",
+            "  return 0;",
+            "}",
+            "",
+          ].join("\n")
+      : [
+          "# Practice mode workspace",
+          "# Write and run code freely. Nothing is submitted.",
+          "",
+          "print(\"Start practicing\")",
+          "",
+        ].join("\n");
 
-const createDefaultWorkspace = () => {
-  const tree = createInitialTree();
+  return [createFile(`main.${config.fileExtension}`, defaultSource)];
+};
+
+const createDefaultWorkspace = (language = "python") => {
+  const tree = createInitialTree(language);
   const mainFile = tree[0];
   return {
     tree,
@@ -188,6 +211,8 @@ const restoreWorkspace = () => {
 };
 
 export default function PracticeStudio() {
+  const [learningLanguage] = useLearningLanguage();
+  const languageConfig = getLanguageConfig(learningLanguage);
   const [tree, setTree] = useState([]);
   const [tabs, setTabs] = useState([]);
   const [activeFileId, setActiveFileId] = useState(null);
@@ -196,6 +221,7 @@ export default function PracticeStudio() {
   const [workspaceReady, setWorkspaceReady] = useState(false);
   const [modal, setModal] = useState({ open: false, type: "", target: null, parentId: null });
   const [nameInput, setNameInput] = useState("");
+  const editorRef = useRef(null);
 
   const {
     output,
@@ -212,16 +238,17 @@ export default function PracticeStudio() {
 
   useEffect(() => {
     const restored = restoreWorkspace();
-    const initial = restored || createDefaultWorkspace();
+    const initial = restored || createDefaultWorkspace(learningLanguage);
     setTree(initial.tree);
     setTabs(initial.tabs);
     setActiveFileId(initial.activeFileId);
     setWorkspaceReady(true);
-  }, []);
+  }, [learningLanguage]);
 
   useEffect(() => {
     if (activeFile?.type === "file") {
       setEditorValue(activeFile.content || "");
+      window.setTimeout(() => editorRef.current?.focus(), 0);
       return;
     }
     setEditorValue("");
@@ -258,6 +285,7 @@ export default function PracticeStudio() {
         code,
         files: workspacePayload.files,
         entryFile: workspacePayload.entryFile,
+        language: learningLanguage,
       });
     } catch (err) {
       setFileError(err.message || "Unable to run code");
@@ -272,20 +300,26 @@ export default function PracticeStudio() {
 
     setFileError("");
     const content = (editorValue ?? "").length ? editorValue : activeFile.content || "";
-    downloadPyFile(activeFile.name || "main.py", content, "main.py");
+    downloadCodeFile(activeFile.name || `main.${languageConfig.fileExtension}`, content, learningLanguage);
   };
 
-  const downloadWorkspacePyFiles = () => {
+  const downloadWorkspaceFiles = () => {
     const workspacePayload = buildWorkspaceRunPayload(tree, activeFileId);
-    const pythonFiles = workspacePayload.files.filter((file) => isLikelyPythonPath(file.path));
-    if (!pythonFiles.length) {
-      setFileError("No Python files found in the workspace.");
+    const sourceFiles = workspacePayload.files.filter((file) =>
+      isLikelySourcePath(file.path, learningLanguage)
+    );
+    if (!sourceFiles.length) {
+      setFileError(`No ${languageConfig.label} files found in the workspace.`);
       return;
     }
 
     setFileError("");
-    for (const file of pythonFiles) {
-      downloadPyFile(toWorkspacePyDownloadName(file.path), file.content || "", "main.py");
+    for (const file of sourceFiles) {
+      downloadCodeFile(
+        toWorkspaceDownloadName(file.path, learningLanguage),
+        file.content || "",
+        learningLanguage
+      );
     }
   };
 
@@ -305,8 +339,10 @@ export default function PracticeStudio() {
   };
 
   const openModal = (type, target = null, parentId = null) => {
+    const defaultName =
+      type === "new-file" ? `untitled.${languageConfig.fileExtension}` : target?.name || "";
     setModal({ open: true, type, target, parentId });
-    setNameInput(target?.name || "");
+    setNameInput(defaultName);
   };
 
   const closeModal = () => {
@@ -334,6 +370,7 @@ export default function PracticeStudio() {
         }
       }
       closeModal();
+      window.setTimeout(() => editorRef.current?.focus(), 0);
       return;
     }
 
@@ -385,7 +422,7 @@ export default function PracticeStudio() {
   };
 
   const resetWorkspace = () => {
-    const initial = createDefaultWorkspace();
+    const initial = createDefaultWorkspace(learningLanguage);
     setTree(initial.tree);
     setTabs(initial.tabs);
     setActiveFileId(initial.activeFileId);
@@ -393,6 +430,7 @@ export default function PracticeStudio() {
     setFileError("");
     stopRun();
     clearOutput();
+    window.setTimeout(() => editorRef.current?.focus(), 0);
   };
 
   return (
@@ -401,7 +439,7 @@ export default function PracticeStudio() {
 
       <div className="border-y border-slate-800 bg-slate-950/70 px-4 py-2 text-xs text-slate-400">
         <div className="flex items-center justify-between">
-          <div className="uppercase tracking-[0.18em]">Practice Workspace</div>
+          <div className="uppercase tracking-[0.18em]">{languageConfig.label} Practice Workspace</div>
           <div>Run freely. No submission required.</div>
         </div>
       </div>
@@ -440,14 +478,14 @@ export default function PracticeStudio() {
                 disabled={!activeFileId}
                 className="rounded-md border border-slate-700 px-3 py-2 text-xs text-slate-200 hover:border-slate-600 disabled:opacity-50"
               >
-                Download .py
+                Download {languageConfig.downloadExt}
               </button>
               <button
-                onClick={downloadWorkspacePyFiles}
+                onClick={downloadWorkspaceFiles}
                 disabled={!tree.length}
                 className="rounded-md border border-slate-700 px-3 py-2 text-xs text-slate-200 hover:border-slate-600 disabled:opacity-50"
               >
-                Download All .py
+                Download All {languageConfig.downloadExt}
               </button>
               <button
                 onClick={runCode}
@@ -475,10 +513,14 @@ export default function PracticeStudio() {
           <div className="flex-1 bg-slate-950">
             <Editor
               height="100%"
-              language="python"
+              language={languageConfig.monaco}
               theme="vscode-dark-plus"
               value={editorValue}
               onChange={handleEditorChange}
+              onMount={(editor) => {
+                editorRef.current = editor;
+                editor.focus();
+              }}
               beforeMount={applyVscodeTheme}
               options={editorOptions}
             />
@@ -495,7 +537,9 @@ export default function PracticeStudio() {
           />
 
           <div className="flex items-center justify-between border-t border-slate-800 bg-slate-900 px-4 py-2 text-xs text-slate-400">
-            <div>{activeFile?.name || "No file"} | Python</div>
+            <div>
+              {activeFile?.name || "No file"} | {languageConfig.label}
+            </div>
             <div>UTF-8 | LF | VSCode-style practice workspace</div>
           </div>
         </div>

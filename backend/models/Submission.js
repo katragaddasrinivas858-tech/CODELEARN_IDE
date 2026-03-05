@@ -2,6 +2,7 @@ const mongoose = require("mongoose");
 
 const SubmissionSchema = new mongoose.Schema(
   {
+    language: { type: String, enum: ["python", "javascript", "c"], default: "python", index: true },
     userId: { type: mongoose.Schema.Types.ObjectId, ref: "User", index: true },
     teacherId: { type: mongoose.Schema.Types.ObjectId, ref: "User", index: true },
     problemId: { type: mongoose.Schema.Types.ObjectId, ref: "Problem", index: true },

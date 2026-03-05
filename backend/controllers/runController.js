@@ -5,9 +5,15 @@ const os = require("os");
 const path = require("path");
 const Project = require("../models/Project");
 const { findNode } = require("../utils/tree");
+const {
+  SUPPORTED_LANGUAGES,
+  normalizeLanguage,
+  isSupportedLanguage,
+} = require("../constants/languages");
 
 const MAX_OUTPUT_BYTES = 1024 * 1024;
 const LEGACY_TIMEOUT_MS = 5000;
+const C_COMPILE_TIMEOUT_MS = 15000;
 const DEFAULT_SESSION_TIMEOUT_MS = 10 * 60 * 1000;
 const MIN_SESSION_TIMEOUT_MS = 30 * 1000;
 const SESSION_TIMEOUT_MS = (() => {
@@ -50,6 +56,39 @@ const IMPORT_TO_PIP_PACKAGE = Object.freeze({
   sklearn: "scikit-learn",
   crypto: "pycryptodome",
 });
+
+const inferLanguageFromPath = (relativePath) => {
+  const normalized = String(relativePath || "")
+    .trim()
+    .toLowerCase();
+  if (!normalized) return null;
+  if (normalized.endsWith(".js") || normalized.endsWith(".mjs") || normalized.endsWith(".cjs")) {
+    return SUPPORTED_LANGUAGES.JAVASCRIPT;
+  }
+  if (normalized.endsWith(".py")) {
+    return SUPPORTED_LANGUAGES.PYTHON;
+  }
+  if (normalized.endsWith(".c")) {
+    return SUPPORTED_LANGUAGES.C;
+  }
+  return null;
+};
+
+const resolveRunLanguage = ({ requestedLanguage, entryFile, workspaceFiles = [] }) => {
+  if (requestedLanguage) {
+    return normalizeLanguage(requestedLanguage);
+  }
+
+  const fromEntry = inferLanguageFromPath(entryFile);
+  if (fromEntry) return fromEntry;
+
+  for (const file of workspaceFiles) {
+    const inferred = inferLanguageFromPath(file?.path);
+    if (inferred) return inferred;
+  }
+
+  return SUPPORTED_LANGUAGES.PYTHON;
+};
 
 const invalidInputError = (message) => {
   const err = new Error(message);
@@ -373,7 +412,12 @@ const resolveExecutionContext = async ({
   files,
   entryFile,
   userId,
+  language,
 }) => {
+  if (language && !isSupportedLanguage(language)) {
+    throw invalidInputError("Unsupported run language.");
+  }
+
   let source = code;
   let workspaceFiles = normalizeWorkspaceFiles(files);
   let entryRelativePath = null;
@@ -414,17 +458,30 @@ const resolveExecutionContext = async ({
     throw invalidInputError("Code required");
   }
 
+  const resolvedLanguage = resolveRunLanguage({
+    requestedLanguage: language,
+    entryFile: entryRelativePath,
+    workspaceFiles,
+  });
+
   return {
     source,
     workspaceFiles,
     entryRelativePath,
+    language: resolvedLanguage,
   };
 };
 
-const writeTempFile = (source) => {
+const writeTempFile = (source, language) => {
+  const extension =
+    language === SUPPORTED_LANGUAGES.JAVASCRIPT
+      ? "js"
+      : language === SUPPORTED_LANGUAGES.C
+        ? "c"
+        : "py";
   const tempFile = path.join(
     os.tmpdir(),
-    `codelearn-${Date.now()}-${Math.random().toString(16).slice(2)}.py`
+    `codelearn-${Date.now()}-${Math.random().toString(16).slice(2)}.${extension}`
   );
   fs.writeFileSync(tempFile, source, "utf8");
   return tempFile;
@@ -461,20 +518,131 @@ const createTempWorkspace = (workspaceFiles, entryRelativePath) => {
   }
 };
 
-const createExecutionTarget = ({ source, workspaceFiles, entryRelativePath }) => {
+const createExecutionTarget = ({ source, workspaceFiles, entryRelativePath, language }) => {
   if (workspaceFiles.length) {
-    return createTempWorkspace(workspaceFiles, entryRelativePath);
+    const target = createTempWorkspace(workspaceFiles, entryRelativePath);
+    return { ...target, compiledBinary: null };
   }
-  return { tempFile: writeTempFile(source), tempDir: null };
+  return { tempFile: writeTempFile(source, language), tempDir: null, compiledBinary: null };
 };
 
-const cleanupTempArtifacts = ({ tempFile, tempDir }) => {
+const summarizeCompileFailure = (result) =>
+  String(result?.stderr || result?.stdout || result?.error?.message || "")
+    .trim()
+    .slice(0, 400);
+
+const collectCSourceFiles = ({ workspaceFiles = [], tempFile, baseDir }) => {
+  const sourceFiles = [];
+  const seen = new Set();
+
+  const pushSource = (value) => {
+    const normalized = String(value || "").trim();
+    if (!normalized || seen.has(normalized)) return;
+    seen.add(normalized);
+    sourceFiles.push(normalized);
+  };
+
+  for (const file of workspaceFiles) {
+    if (!file || typeof file.path !== "string") continue;
+    if (!file.path.toLowerCase().endsWith(".c")) continue;
+    const absolutePath = path.resolve(baseDir, ...file.path.split("/"));
+    if (fs.existsSync(absolutePath)) pushSource(absolutePath);
+  }
+
+  if (!sourceFiles.length && String(tempFile || "").toLowerCase().endsWith(".c")) {
+    pushSource(tempFile);
+  }
+
+  return sourceFiles;
+};
+
+const buildRuntimeProcess = ({ context, tempFile, tempDir }) => {
+  const runtimeCwd = tempDir || path.dirname(tempFile);
+
+  if (context.language === SUPPORTED_LANGUAGES.PYTHON) {
+    const dependencyPythonPaths = ensureRuntimeDependencies(context);
+    return {
+      command: "python",
+      args: ["-u", tempFile],
+      cwd: runtimeCwd,
+      env: buildPythonEnv(dependencyPythonPaths),
+      compiledBinary: null,
+    };
+  }
+
+  if (context.language === SUPPORTED_LANGUAGES.JAVASCRIPT) {
+    return {
+      command: "node",
+      args: [tempFile],
+      cwd: runtimeCwd,
+      env: { ...process.env },
+      compiledBinary: null,
+    };
+  }
+
+  if (context.language === SUPPORTED_LANGUAGES.C) {
+    const sourceFiles = collectCSourceFiles({
+      workspaceFiles: context.workspaceFiles,
+      tempFile,
+      baseDir: runtimeCwd,
+    });
+    if (!sourceFiles.length) {
+      throw invalidInputError("No C source file found to compile.");
+    }
+
+    const outputBinary = path.join(
+      runtimeCwd,
+      `codelearn-bin-${Date.now()}-${Math.random().toString(16).slice(2)}${
+        process.platform === "win32" ? ".exe" : ""
+      }`
+    );
+
+    const compile = spawnSync(
+      "gcc",
+      [...sourceFiles, "-O2", "-std=c11", "-lm", "-o", outputBinary],
+      {
+        cwd: runtimeCwd,
+        encoding: "utf8",
+        timeout: C_COMPILE_TIMEOUT_MS,
+        maxBuffer: 4 * 1024 * 1024,
+      }
+    );
+
+    if (compile.error?.code === "ETIMEDOUT") {
+      throw invalidInputError("C compilation timed out.");
+    }
+    if (compile.error) {
+      throw invalidInputError(`C compiler error: ${compile.error.message}`);
+    }
+    if (compile.status !== 0) {
+      const details = summarizeCompileFailure(compile);
+      throw invalidInputError(
+        `C compilation failed.${details ? ` ${details}` : ""}`
+      );
+    }
+
+    return {
+      command: outputBinary,
+      args: [],
+      cwd: runtimeCwd,
+      env: { ...process.env },
+      compiledBinary: outputBinary,
+    };
+  }
+
+  throw invalidInputError("Unsupported run language.");
+};
+
+const cleanupTempArtifacts = ({ tempFile, tempDir, compiledBinary }) => {
   if (tempDir) {
     fs.rm(tempDir, { recursive: true, force: true }, () => {});
     return;
   }
   if (tempFile) {
     fs.unlink(tempFile, () => {});
+  }
+  if (compiledBinary && compiledBinary !== tempFile) {
+    fs.unlink(compiledBinary, () => {});
   }
 };
 
@@ -509,7 +677,11 @@ const finishSession = (session, payload) => {
   session.finished = true;
   clearTimeout(session.killTimer);
   if (session.cleanupTimer) clearTimeout(session.cleanupTimer);
-  cleanupTempArtifacts({ tempFile: session.tempFile, tempDir: session.tempDir });
+  cleanupTempArtifacts({
+    tempFile: session.tempFile,
+    tempDir: session.tempDir,
+    compiledBinary: session.compiledBinary,
+  });
 
   emitSessionEvent(session, "end", payload);
 
@@ -528,9 +700,10 @@ const finishSession = (session, payload) => {
 const runPython = async (req, res) => {
   let tempFile = null;
   let tempDir = null;
+  let compiledBinary = null;
 
   try {
-    const { code, projectId, fileId, input, files, entryFile } = req.body;
+    const { code, projectId, fileId, input, files, entryFile, language } = req.body;
     const context = await resolveExecutionContext({
       code,
       projectId,
@@ -538,16 +711,18 @@ const runPython = async (req, res) => {
       files,
       entryFile,
       userId: req.user.id,
+      language,
     });
     const target = createExecutionTarget(context);
     tempFile = target.tempFile;
     tempDir = target.tempDir;
-    const dependencyPythonPaths = ensureRuntimeDependencies(context);
+    const runtime = buildRuntimeProcess({ context, tempFile, tempDir });
+    compiledBinary = runtime.compiledBinary;
 
-    const child = spawn("python", ["-u", tempFile], {
+    const child = spawn(runtime.command, runtime.args, {
       stdio: ["pipe", "pipe", "pipe"],
-      cwd: tempDir || path.dirname(tempFile),
-      env: buildPythonEnv(dependencyPythonPaths),
+      cwd: runtime.cwd,
+      env: runtime.env,
     });
 
     let stdout = "";
@@ -564,7 +739,7 @@ const runPython = async (req, res) => {
       if (completed) return null;
       completed = true;
       clearTimeout(killTimer);
-      cleanupTempArtifacts({ tempFile, tempDir });
+      cleanupTempArtifacts({ tempFile, tempDir, compiledBinary });
       return res.json({ output });
     };
 
@@ -600,7 +775,7 @@ const runPython = async (req, res) => {
     }
     child.stdin.end();
   } catch (err) {
-    cleanupTempArtifacts({ tempFile, tempDir });
+    cleanupTempArtifacts({ tempFile, tempDir, compiledBinary });
     return res.status(err.status || 500).json({ error: err.message || "Run failed" });
   }
 };
@@ -608,9 +783,10 @@ const runPython = async (req, res) => {
 const startRunSession = async (req, res) => {
   let tempFile = null;
   let tempDir = null;
+  let compiledBinary = null;
 
   try {
-    const { code, projectId, fileId, input, files, entryFile } = req.body;
+    const { code, projectId, fileId, input, files, entryFile, language } = req.body;
     const context = await resolveExecutionContext({
       code,
       projectId,
@@ -618,16 +794,18 @@ const startRunSession = async (req, res) => {
       files,
       entryFile,
       userId: req.user.id,
+      language,
     });
     const target = createExecutionTarget(context);
     tempFile = target.tempFile;
     tempDir = target.tempDir;
-    const dependencyPythonPaths = ensureRuntimeDependencies(context);
+    const runtime = buildRuntimeProcess({ context, tempFile, tempDir });
+    compiledBinary = runtime.compiledBinary;
 
-    const child = spawn("python", ["-u", tempFile], {
+    const child = spawn(runtime.command, runtime.args, {
       stdio: ["pipe", "pipe", "pipe"],
-      cwd: tempDir || path.dirname(tempFile),
-      env: buildPythonEnv(dependencyPythonPaths),
+      cwd: runtime.cwd,
+      env: runtime.env,
     });
     const sessionId = randomUUID();
 
@@ -637,6 +815,7 @@ const startRunSession = async (req, res) => {
       child,
       tempFile,
       tempDir,
+      compiledBinary,
       clients: new Set(),
       events: [],
       outputBytes: 0,
@@ -652,6 +831,7 @@ const startRunSession = async (req, res) => {
       sessionId,
       status: "running",
       timeoutMs: SESSION_TIMEOUT_MS,
+      language: context.language,
     });
 
     const handleOutput = (stream, chunk) => {
@@ -704,7 +884,7 @@ const startRunSession = async (req, res) => {
 
     return res.status(201).json({ sessionId, timeoutMs: SESSION_TIMEOUT_MS });
   } catch (err) {
-    cleanupTempArtifacts({ tempFile, tempDir });
+    cleanupTempArtifacts({ tempFile, tempDir, compiledBinary });
     return res.status(err.status || 500).json({ error: err.message || "Run failed" });
   }
 };

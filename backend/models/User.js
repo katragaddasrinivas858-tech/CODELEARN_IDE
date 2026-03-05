@@ -11,6 +11,12 @@ const UserSchema = new mongoose.Schema(
     emailVerified: { type: Boolean, default: false },
     verificationToken: { type: String, default: "" },
     verificationTokenExpires: { type: Date, default: null },
+    learningLanguage: {
+      type: String,
+      enum: ["python", "javascript", "c"],
+      default: "python",
+      index: true,
+    },
   },
   { timestamps: true }
 );

@@ -3,6 +3,7 @@ import Editor from "@monaco-editor/react";
 import ConsolePanel from "./ConsolePanel";
 import useInteractiveRun from "../hooks/useInteractiveRun";
 import { applyVscodeTheme, editorOptions } from "../lib/monaco";
+import { getLanguageConfig, normalizeLanguage } from "../lib/languages";
 
 const lessonCodeOptions = {
   ...editorOptions,
@@ -13,6 +14,8 @@ const lessonCodeOptions = {
 };
 
 export default function LessonCodeBlock({ block }) {
+  const blockLanguage = normalizeLanguage(block?.language || "python");
+  const languageConfig = getLanguageConfig(blockLanguage);
   const initialCode = String(block?.code || "");
   const bootInput = String(block?.stdin || "");
   const [code, setCode] = useState(initialCode);
@@ -32,7 +35,7 @@ export default function LessonCodeBlock({ block }) {
   const runSnippet = async () => {
     setRunError("");
     try {
-      await startRun({ code, initialInput: bootInput });
+      await startRun({ code, initialInput: bootInput, language: blockLanguage });
     } catch (err) {
       setRunError(err.message || "Unable to run code block");
     }
@@ -51,7 +54,7 @@ export default function LessonCodeBlock({ block }) {
           <div className="text-sm font-semibold text-emerald-200">
             {block?.title || "Interactive Code Block"}
           </div>
-          <div className="text-[11px] text-slate-500">Python</div>
+          <div className="text-[11px] text-slate-500">{languageConfig.label}</div>
         </div>
         <div className="flex items-center gap-2">
           <div className="text-xs text-slate-500">{runState.toUpperCase()}</div>
@@ -76,7 +79,7 @@ export default function LessonCodeBlock({ block }) {
       <div className="h-[260px] border-b border-slate-800">
         <Editor
           height="100%"
-          language="python"
+          language={languageConfig.monaco}
           theme="vscode-dark-plus"
           value={code}
           onChange={(value) => setCode(value ?? "")}

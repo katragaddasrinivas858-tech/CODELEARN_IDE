@@ -2,13 +2,17 @@ import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { apiRequest } from "../lib/api";
 import Navbar from "../components/Navbar";
+import useLearningLanguage from "../hooks/useLearningLanguage";
+import { getLanguageConfig } from "../lib/languages";
 
 export default function Dashboard() {
   const navigate = useNavigate();
+  const [learningLanguage] = useLearningLanguage();
   const [projects, setProjects] = useState([]);
   const [name, setName] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const languageConfig = getLanguageConfig(learningLanguage);
 
   const loadProjects = async () => {
     try {
@@ -30,7 +34,7 @@ export default function Dashboard() {
     try {
       const project = await apiRequest("/api/projects", {
         method: "POST",
-        body: JSON.stringify({ name }),
+        body: JSON.stringify({ name, language: learningLanguage }),
       });
       setName("");
       navigate(`/projects/${project._id}`);
@@ -59,7 +63,7 @@ export default function Dashboard() {
           <div>
             <div className="text-2xl font-semibold text-white">Your Projects</div>
             <div className="text-sm text-slate-400">
-              Create, manage, and launch your coding workspaces.
+              Create, manage, and launch your {languageConfig.label} coding workspaces.
             </div>
           </div>
           <div className="flex items-center gap-3">
@@ -68,6 +72,12 @@ export default function Dashboard() {
               onChange={(e) => setName(e.target.value)}
               placeholder="New project name"
               className="rounded-md border border-slate-800 bg-slate-900 px-3 py-2 text-sm text-white placeholder:text-slate-600"
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  createProject();
+                }
+              }}
             />
             <button
               onClick={createProject}

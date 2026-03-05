@@ -1,28 +1,32 @@
-﻿import { useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import Navbar from "../components/Navbar";
 import { apiRequest } from "../lib/api";
+import useLearningLanguage from "../hooks/useLearningLanguage";
+import { getLanguageConfig, withLanguageQuery } from "../lib/languages";
 
 export default function Leaderboard() {
+  const [learningLanguage] = useLearningLanguage();
   const [leaderboard, setLeaderboard] = useState([]);
   const [error, setError] = useState("");
+  const languageConfig = getLanguageConfig(learningLanguage);
 
   useEffect(() => {
     const load = async () => {
       try {
-        const data = await apiRequest("/api/leaderboard");
+        const data = await apiRequest(withLanguageQuery("/api/leaderboard", learningLanguage));
         setLeaderboard(data.leaderboard || []);
       } catch (err) {
         setError(err.message);
       }
     };
     load();
-  }, []);
+  }, [learningLanguage]);
 
   return (
     <div className="min-h-screen bg-slate-950 text-white">
       <Navbar />
       <div className="mx-auto max-w-6xl px-6 py-10">
-        <div className="text-2xl font-semibold">Leaderboard</div>
+        <div className="text-2xl font-semibold">{languageConfig.label} Leaderboard</div>
         <div className="text-sm text-slate-400">
           Ranked by solved count, runtime, and complexity efficiency.
         </div>

@@ -1,13 +1,18 @@
 import { NavLink, useNavigate } from "react-router-dom";
 import { getUser, isTeacher } from "../lib/auth";
+import { SUPPORTED_LANGUAGES } from "../lib/languages";
+import useLearningLanguage from "../hooks/useLearningLanguage";
 
 const navLinkClass = ({ isActive }) =>
-  `px-3 py-2 rounded-md text-sm font-medium transition ${
-    isActive ? "bg-slate-800 text-white" : "text-slate-300 hover:text-white"
+  `rounded-md px-3 py-2 text-sm font-medium transition ${
+    isActive
+      ? "bg-slate-800 text-white ring-1 ring-slate-600"
+      : "text-slate-300 hover:bg-slate-900 hover:text-white"
   }`;
 
 export default function Navbar({ onToggleTutorial = () => {}, showTutorialToggle = false }) {
   const navigate = useNavigate();
+  const [learningLanguage, setLearningLanguage] = useLearningLanguage();
 
   const logout = () => {
     localStorage.removeItem("token");
@@ -70,6 +75,18 @@ export default function Navbar({ onToggleTutorial = () => {}, showTutorialToggle
             {user.displayName}
           </div>
         )}
+        <select
+          value={learningLanguage}
+          onChange={(event) => setLearningLanguage(event.target.value)}
+          className="rounded-md border border-slate-800 bg-slate-900 px-2 py-2 text-xs text-slate-200 transition hover:border-slate-600"
+          title="Current learning language"
+        >
+          {SUPPORTED_LANGUAGES.map((language) => (
+            <option key={language.id} value={language.id}>
+              {language.label}
+            </option>
+          ))}
+        </select>
         <button
           onClick={logout}
           className="rounded-md bg-emerald-500 px-3 py-2 text-sm font-semibold text-slate-950 transition hover:bg-emerald-400"

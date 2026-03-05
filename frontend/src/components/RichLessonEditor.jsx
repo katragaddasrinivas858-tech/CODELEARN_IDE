@@ -5,6 +5,7 @@ import {
   normalizeLessonBlocks,
   isSafeImageSource,
 } from "../lib/lessonBlocks";
+import { SUPPORTED_LANGUAGES, normalizeLanguage } from "../lib/languages";
 
 const moveItem = (items, fromIndex, toIndex) => {
   if (fromIndex === toIndex) return [...items];
@@ -402,11 +403,16 @@ export default function RichLessonEditor({ blocks, onChange, disabled = false })
               <div className="space-y-2">
                 <div className="grid gap-2 sm:grid-cols-[180px_minmax(0,1fr)]">
                   <select
-                    value="python"
-                    disabled
+                    value={normalizeLanguage(block.language || "python")}
+                    disabled={disabled}
+                    onChange={(event) => updateBlock(block.id, { language: event.target.value })}
                     className="rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-xs text-slate-300 outline-none"
                   >
-                    <option value="python">Python (runnable)</option>
+                    {SUPPORTED_LANGUAGES.map((language) => (
+                      <option key={language.id} value={language.id}>
+                        {language.label} (runnable)
+                      </option>
+                    ))}
                   </select>
                   <input
                     type="text"
@@ -422,7 +428,7 @@ export default function RichLessonEditor({ blocks, onChange, disabled = false })
                   value={block.code || ""}
                   disabled={disabled}
                   onChange={(event) => updateBlock(block.id, { code: event.target.value })}
-                  placeholder="Write runnable Python code..."
+                  placeholder={`Write runnable ${normalizeLanguage(block.language || "python")} code...`}
                   className="w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 font-mono text-xs text-emerald-100 outline-none focus:border-emerald-400"
                 />
                 <textarea
